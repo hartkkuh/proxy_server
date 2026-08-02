@@ -1,0 +1,41 @@
+name: Run Apify TikTok Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      token:
+        description: "Apify token"
+        required: true
+        type: string
+
+      json:
+        description: "Apify actor input JSON"
+        required: true
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Apify CLI
+        run: |
+          curl -fsSL https://apify.com/install-cli.sh | bash
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Login to Apify
+        env:
+          APIFY_TOKEN: ${{ inputs.token }}
+        run: |
+          apify login --token "$APIFY_TOKEN"
+
+      - name: Run TikTok scraper
+        env:
+          INPUT_JSON: ${{ inputs.json }}
+        run: |
+          echo "$INPUT_JSON" > input.json
+
+          apify call clockworks/tiktok-scraper \
+            --silent \
+            --input-file input.json \
+            --output-dataset
