@@ -3,20 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ניהול קבצים</title>
+    <title>העלאת קישור לדרייב</title>
     <link rel="stylesheet" href="../../style.css">
 </head>
 <body>
     <div class="container">
         <header>
             <h1>ניהול קבצים</h1>
-            <p>העלאת קישורים</p>
+            <p>העלאת קישורים ל-Google Drive</p>
         </header>
 
         <div id="toast" class="toast" role="status"></div>
 
         <section class="card">
-            <h2>העלאת קבצים מקישורים</h2>
+            <h2>העלאה ל-Google Drive</h2>
             <form id="upload-form" class="upload-form">
                 <input
                     type="password"
@@ -25,6 +25,16 @@
                     required
                     autocomplete="off"
                 >
+                <label for="drive-token-input" class="file-picker">
+                    <span class="file-picker-text">בחר token.json ל-Google Drive</span>
+                    <input
+                        type="file"
+                        id="drive-token-input"
+                        accept=".json,application/json"
+                        required
+                    >
+                </label>
+                <p id="drive-token-name" class="file-name"></p>
                 <textarea
                     id="url-input"
                     placeholder="קישור בשורה&#10;https://example.com/file.pdf"
@@ -32,7 +42,7 @@
                     rows="6"
                     spellcheck="false"
                 ></textarea>
-                <button type="submit" id="upload-btn">העלה</button>
+                <button type="submit" id="upload-btn">העלה לדרייב</button>
             </form>
         </section>
 

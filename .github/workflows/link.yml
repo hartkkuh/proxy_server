@@ -8,14 +8,67 @@ jobs:
   upload:
     runs-on: ubuntu-latest
     steps:
-      - name: Send URLs to server
+      - name: Download URL and upload to Google Drive
         env:
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
         run: |
-          echo "Sending URLs"
+          URL=$(echo "$PAYLOAD" | jq -r '.url')
+          echo "Downloading URL: ${URL}"
 
-          curl -X POST "https://drive-ygsv.onrender.com/upload" \
-            -H "Content-Type: application/json" \
-            -d "$(echo "$PAYLOAD" | jq '{url: .url}')" \
-            --fail-with-body \
-            --show-error
+          echo "$PAYLOAD" | jq 'if .token | type == "string" then .token | fromjson else .token end' > token.json
+
+          python3 -m pip install -U google-api-python-client google-auth google-auth-oauthlib
+
+          FILENAME=$(basename "$(echo "$URL" | sed 's/[?#].*//')")
+          if [ -z "$FILENAME" ] || [ "$FILENAME" = "/" ]; then
+            FILENAME="download"
+          fi
+
+          mkdir -p downloads
+          cd downloads
+          curl -L --fail -OJ "${URL}" || curl -L --fail -o "${FILENAME}" "${URL}"
+          FILE="$(pwd)/$(ls -t | head -n1)"
+          cd ..
+
+          echo "Uploading to Google Drive: ${FILE}"
+
+          export FILE
+          python3 <<'EOF'
+          import json
+          import mimetypes
+          import os
+
+          from google.auth.transport.requests import Request
+          from google.oauth2.credentials import Credentials
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          file_path = os.environ["FILE"]
+          file_name = os.path.basename(file_path)
+          mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+
+          with open("token.json", encoding="utf-8") as f:
+              token_info = json.load(f)
+
+          scopes = ["https://www.googleapis.com/auth/drive"]
+
+          if token_info.get("type") == "service_account":
+              creds = service_account.Credentials.from_service_account_info(
+                  token_info, scopes=scopes
+              )
+          else:
+              creds = Credentials.from_authorized_user_info(token_info, scopes=scopes)
+              if creds.expired and creds.refresh_token:
+                  creds.refresh(Request())
+
+          service = build("drive", "v3", credentials=creds)
+          media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
+          uploaded = (
+              service.files()
+              .create(body={"name": file_name}, media_body=media, fields="id,name,webViewLink")
+              .execute()
+          )
+
+          print(json.dumps(uploaded, ensure_ascii=False, indent=2))
+          EOF

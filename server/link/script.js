@@ -4,12 +4,14 @@ const toast = document.getElementById("toast");
 const uploadForm = document.getElementById("upload-form");
 const urlInput = document.getElementById("url-input");
 const tokenInput = document.getElementById("token-input");
+const driveTokenInput = document.getElementById("drive-token-input");
+const driveTokenName = document.getElementById("drive-token-name");
 const uploadBtn = document.getElementById("upload-btn");
 const responseSection = document.getElementById("response-section");
 const responseStatus = document.getElementById("response-status");
 const responseBody = document.getElementById("response-body");
 
-if (!uploadForm || !urlInput || !tokenInput || !uploadBtn) {
+if (!uploadForm || !urlInput || !tokenInput || !driveTokenInput || !uploadBtn) {
     throw new Error("שגיאה בטעינת הדף. נסה לרענן עם Ctrl+Shift+R");
 }
 
@@ -59,25 +61,69 @@ function parseUrls(text) {
         .filter(Boolean);
 }
 
+function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(file);
+    });
+}
+
+driveTokenInput.addEventListener("change", () => {
+    const file = driveTokenInput.files?.[0];
+    if (driveTokenName) {
+        driveTokenName.textContent = file ? `נבחר: ${file.name}` : "";
+    }
+});
+
 uploadForm.addEventListener("submit", async (event) => {
     event.preventDefault();
 
     const urls = parseUrls(urlInput.value);
-    const token = tokenInput.value.trim();
-    if (!urls.length || !token) return;
+    const githubToken = tokenInput.value.trim();
+    const driveTokenFile = driveTokenInput.files?.[0];
+
+    if (!urls.length || !githubToken || !driveTokenFile) return;
+
+    let driveToken;
+    try {
+        driveToken = JSON.parse(await readFileAsText(driveTokenFile));
+    } catch {
+        showToast("קובץ token.json לא תקין", "error");
+        return;
+    }
 
     uploadBtn.disabled = true;
-    uploadBtn.textContent = "מעלה...";
+    uploadBtn.textContent = "שולח...";
 
     try {
-        const { data, status } = await uploadUrl(urls, token);
-        showResponse(data, status);
+        const results = [];
 
-        if (data.success) {
-            showToast(data.message || "הבקשה נשלחה בהצלחה", "success");
+        for (const url of urls) {
+            const { data, status } = await uploadUrl(url, driveToken, githubToken);
+            results.push({ url, status, ...data });
+        }
+
+        const allSuccess = results.every((item) => item.success === true);
+        showResponse(
+            {
+                success: allSuccess,
+                message: allSuccess
+                    ? "כל הטריגרים הופעלו, ההורדה והעלאה לדרייב מתבצעות ב-GitHub Actions"
+                    : "חלק מהטריגרים נכשלו",
+                results,
+            },
+            allSuccess ? 204 : 400
+        );
+
+        if (allSuccess) {
+            showToast("הבקשות נשלחו בהצלחה", "success");
             urlInput.value = "";
+            driveTokenInput.value = "";
+            if (driveTokenName) driveTokenName.textContent = "";
         } else {
-            showToast(extractError(data), "error");
+            showToast("חלק מהבקשות נכשלו", "error");
         }
     } catch (err) {
         const message = getNetworkErrorMessage(err);
@@ -92,6 +138,6 @@ uploadForm.addEventListener("submit", async (event) => {
         showToast(message, "error");
     } finally {
         uploadBtn.disabled = false;
-        uploadBtn.textContent = "העלה";
+        uploadBtn.textContent = "העלה לדרייב";
     }
 });
