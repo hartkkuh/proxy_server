@@ -29,12 +29,22 @@ jobs:
             --html=on \
             --daemon=yes \
             --exit-with-children \
+            --encoding=h264 \
+            --quality=50 \
             --start-child="chromium-browser \
               --no-sandbox \
               --disable-dev-shm-usage \
               --disable-extensions \
               --disable-sync \
-                --window-size=480,640"
+              --disable-background-networking \
+              --disable-background-timer-throttling \
+              --disable-renderer-backgrounding \
+              --disable-component-update \
+              --disable-features=Translate,BackForwardCache \
+              --no-first-run \
+              --no-default-browser-check \
+              --renderer-process-limit=2 \
+              --window-size=854,480"
 
       - name: Start Cloudflare Tunnel
         run: |
