@@ -8,6 +8,8 @@ jobs:
   duckduckgo_search:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Search DuckDuckGo and save HTML
         env:
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
@@ -32,13 +34,13 @@ jobs:
               URL="https://html.duckduckgo.com/html/?q=${ENCODED}"
               ;;
             images)
-              URL="https://duckduckgo.com/?q=${ENCODED}&iax=images&ia=images"
+              URL="https://html.duckduckgo.com/html/?q=${ENCODED}&iax=images&ia=images"
               ;;
             videos)
-              URL="https://duckduckgo.com/?q=${ENCODED}&iax=videos&ia=videos"
+              URL="https://html.duckduckgo.com/html/?q=${ENCODED}&iax=videos&ia=videos"
               ;;
             news)
-              URL="https://duckduckgo.com/?q=${ENCODED}&iar=news&ia=news"
+              URL="https://html.duckduckgo.com/html/?q=${ENCODED}&iar=news&ia=news"
               ;;
             *)
               echo "Invalid type: $TYPE"
@@ -47,6 +49,7 @@ jobs:
           esac
 
           mkdir -p output
+          RAW="output/raw-${TYPE}.html"
           OUT="output/duckduckgo-${TYPE}.html"
 
           echo "Question: $QUESTION"
@@ -56,8 +59,11 @@ jobs:
           curl -fsSL \
             -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
             -H "Accept: text/html,application/xhtml+xml" \
-            -o "$OUT" \
+            -o "$RAW" \
             "$URL"
+
+          python3 .github/scripts/normalize_duckduckgo_html.py "$RAW" "$OUT"
+          rm -f "$RAW"
 
           echo "Saved: $OUT ($(wc -c < "$OUT") bytes)"
 
