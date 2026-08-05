@@ -20,7 +20,7 @@ jobs:
 
       - name: Start virtual display
         run: |
-          Xvfb :99 -screen 0 1280x720x24 &
+          Xvfb :99 -screen 0 1024x576x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
           sleep 3
 
