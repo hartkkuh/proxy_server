@@ -8,14 +8,62 @@ jobs:
   duckduckgo_search:
     runs-on: ubuntu-latest
     steps:
-      - name: Send search to server
+      - name: Search DuckDuckGo and save HTML
         env:
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
         run: |
-          echo "Sending DuckDuckGo search"
+          QUESTION=$(echo "$PAYLOAD" | jq -r '.question // empty')
+          TYPE=$(echo "$PAYLOAD" | jq -r '.type // empty')
 
-          curl -X POST "https://drive-ygsv.onrender.com/duckduckgo-search" \
-            -H "Content-Type: application/json" \
-            -d "$(echo "$PAYLOAD" | jq '{question, type}')" \
-            --fail-with-body \
-            --show-error
+          if [ -z "$QUESTION" ]; then
+            echo "Missing question"
+            exit 1
+          fi
+          if [ -z "$TYPE" ]; then
+            echo "Missing type"
+            exit 1
+          fi
+
+          export QUESTION
+          ENCODED=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['QUESTION']))")
+
+          case "$TYPE" in
+            web)
+              URL="https://html.duckduckgo.com/html/?q=${ENCODED}"
+              ;;
+            images)
+              URL="https://duckduckgo.com/?q=${ENCODED}&iax=images&ia=images"
+              ;;
+            videos)
+              URL="https://duckduckgo.com/?q=${ENCODED}&iax=videos&ia=videos"
+              ;;
+            news)
+              URL="https://duckduckgo.com/?q=${ENCODED}&iar=news&ia=news"
+              ;;
+            *)
+              echo "Invalid type: $TYPE"
+              exit 1
+              ;;
+          esac
+
+          mkdir -p output
+          OUT="output/duckduckgo-${TYPE}.html"
+
+          echo "Question: $QUESTION"
+          echo "Type: $TYPE"
+          echo "Fetching: $URL"
+
+          curl -fsSL \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml" \
+            -o "$OUT" \
+            "$URL"
+
+          echo "Saved: $OUT ($(wc -c < "$OUT") bytes)"
+
+      - name: Upload HTML artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: duckduckgo-search
+          path: output/
+          if-no-files-found: error

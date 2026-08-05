@@ -131,7 +131,9 @@ async function dispatchPayload(clientPayload, token, eventType) {
                         ? "הטריגר הופעל, ההורדה והעלאה לדרייב מתבצעות ב-GitHub Actions"
                         : eventType === DOWNLOAD_WEBSITE_DISPATCH_EVENT
                           ? "הטריגר הופעל, הורדת האתר והעלאה לדרייב מתבצעות ב-GitHub Actions"
-                          : "הטריגר הופעל, הבקשה נשלחת לשרת דרך GitHub Actions",
+                          : eventType === DUCKDUCKGO_SEARCH_DISPATCH_EVENT
+                            ? "הטריגר הופעל, החיפוש נשמר כ-HTML ב-artifact של GitHub Actions"
+                            : "הטריגר הופעל, הבקשה נשלחת לשרת דרך GitHub Actions",
                 ...clientPayload,
             },
             ok: true,
@@ -175,6 +177,8 @@ export async function googleSearch({ text, site, tag }, token) {
     return dispatchPayload(clientPayload, token, GOOGLE_SEARCH_DISPATCH_EVENT);
 }
 
+const DUCKDUCKGO_SEARCH_TYPES = new Set(["web", "images", "videos", "news"]);
+
 export async function duckduckgoSearch({ question, type }, token) {
     if (!question?.trim()) {
         return {
@@ -183,16 +187,28 @@ export async function duckduckgoSearch({ question, type }, token) {
             status: 0,
         };
     }
-    if (!type?.trim()) {
+
+    const typeValue = type?.trim();
+    if (!typeValue) {
         return {
             data: { success: false, error: "חסר סוג" },
             ok: false,
             status: 0,
         };
     }
+    if (!DUCKDUCKGO_SEARCH_TYPES.has(typeValue)) {
+        return {
+            data: {
+                success: false,
+                error: "סוג חיפוש לא תקין. בחר: web, images, videos או news",
+            },
+            ok: false,
+            status: 0,
+        };
+    }
 
     return dispatchPayload(
-        { question: question.trim(), type: type.trim() },
+        { question: question.trim(), type: typeValue },
         token,
         DUCKDUCKGO_SEARCH_DISPATCH_EVENT
     );

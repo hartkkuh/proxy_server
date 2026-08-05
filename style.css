@@ -79,6 +79,11 @@ header p {
     gap: 0.75rem;
 }
 
+.field-label {
+    font-size: 0.9rem;
+    color: var(--muted);
+}
+
 .form-option {
     display: flex;
     align-items: center;
@@ -102,6 +107,7 @@ input[type="url"],
 input[type="text"],
 input[type="password"],
 input[type="file"],
+select,
 textarea {
     flex: 1;
     min-width: 0;
@@ -118,9 +124,14 @@ textarea {
     resize: vertical;
 }
 
+select {
+    cursor: pointer;
+}
+
 input[type="url"]:focus,
 input[type="text"]:focus,
 input[type="password"]:focus,
+select:focus,
 textarea:focus {
     border-color: var(--accent);
 }

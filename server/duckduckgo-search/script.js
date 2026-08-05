@@ -71,7 +71,7 @@ searchForm.addEventListener("submit", async (event) => {
         if (data.success) {
             showToast(data.message || "הבקשה נשלחה בהצלחה", "success");
             questionInput.value = "";
-            typeInput.value = "";
+            typeInput.selectedIndex = 0;
         } else {
             showToast(extractError(data), "error");
         }
