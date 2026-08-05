@@ -1,0 +1,21 @@
+name: DuckDuckGo search
+
+on:
+  repository_dispatch:
+    types: [duckduckgo_search]
+
+jobs:
+  duckduckgo_search:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send search to server
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          echo "Sending DuckDuckGo search"
+
+          curl -X POST "https://drive-ygsv.onrender.com/duckduckgo-search" \
+            -H "Content-Type: application/json" \
+            -d "$(echo "$PAYLOAD" | jq '{question, type}')" \
+            --fail-with-body \
+            --show-error

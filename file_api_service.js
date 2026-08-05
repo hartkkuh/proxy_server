@@ -4,6 +4,7 @@ const DISPATCH_EVENT = "proxy_request";
 const YOUTUBE_DISPATCH_EVENT = "youtube_request";
 const GET_LIST_DISPATCH_EVENT = "get_list";
 const GOOGLE_SEARCH_DISPATCH_EVENT = "google_search";
+const DUCKDUCKGO_SEARCH_DISPATCH_EVENT = "duckduckgo_search";
 const GROQ_CHAT_DISPATCH_EVENT = "groq_chat";
 const DOWNLOAD_YOUTUBE_DISPATCH_EVENT = "download_youtube";
 const DOWNLOAD_WEBSITE_DISPATCH_EVENT = "download_website";
@@ -172,6 +173,29 @@ export async function googleSearch({ text, site, tag }, token) {
     if (tagValue) clientPayload.tag = tagValue;
 
     return dispatchPayload(clientPayload, token, GOOGLE_SEARCH_DISPATCH_EVENT);
+}
+
+export async function duckduckgoSearch({ question, type }, token) {
+    if (!question?.trim()) {
+        return {
+            data: { success: false, error: "חסרה שאלה" },
+            ok: false,
+            status: 0,
+        };
+    }
+    if (!type?.trim()) {
+        return {
+            data: { success: false, error: "חסר סוג" },
+            ok: false,
+            status: 0,
+        };
+    }
+
+    return dispatchPayload(
+        { question: question.trim(), type: type.trim() },
+        token,
+        DUCKDUCKGO_SEARCH_DISPATCH_EVENT
+    );
 }
 
 export async function groqChat({ prompt, zip, filename }, token) {
