@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""Normalize saved DuckDuckGo HTML for offline viewing with direct links."""
+
+from __future__ import annotations
+
 import re
 import sys
 from html import unescape
@@ -9,7 +13,7 @@ from urllib.request import Request, urlopen
 BASE = "https://html.duckduckgo.com"
 
 
-def fetch(url: str) -> str:
+def fetch(url: str) -> tuple[str, str]:
     req = Request(
         url,
         headers={
@@ -17,12 +21,14 @@ def fetch(url: str) -> str:
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
-            )
+            ),
+            "Accept": "text/css,*/*;q=0.1",
         },
     )
     with urlopen(req, timeout=30) as res:
+        content_type = (res.headers.get_content_type() or "").lower()
         charset = res.headers.get_content_charset() or "utf-8"
-        return res.read().decode(charset, errors="replace")
+        return res.read().decode(charset, errors="replace"), content_type
 
 
 def absolutize(url: str) -> str:
@@ -48,23 +54,37 @@ def unwrap_ddg(url: str) -> str:
     return unquote(target)
 
 
-def rewrite_attr(match: re.Match) -> str:
+def rewrite_attr(match: re.Match[str]) -> str:
     attr, quote, value = match.group(1), match.group(2), match.group(3)
     fixed = unwrap_ddg(unescape(value))
     return f"{attr}={quote}{fixed}{quote}"
 
 
-def inline_css(match: re.Match) -> str:
+def inline_css(match: re.Match[str]) -> str:
     tag = match.group(0)
-    href_match = re.search(r'href=(["\'])(.*?)\1', tag, flags=re.IGNORECASE | re.DOTALL)
+    href_match = re.search(
+        r'href=(["\'])(.*?)\1', tag, flags=re.IGNORECASE | re.DOTALL
+    )
     if not href_match:
         return tag
 
     css_url = href_match.group(2)
     try:
-        css = fetch(css_url)
+        css, content_type = fetch(css_url)
+        looks_like_html = css.lstrip().lower().startswith(
+            ("<!doctype", "<html", "<!doctype html")
+        )
+        if looks_like_html or (content_type and "css" not in content_type and "javascript" not in content_type):
+            # Keep absolute stylesheet link if the response isn't real CSS
+            return re.sub(
+                r'href=(["\'])(.*?)\1',
+                lambda m: f'href="{css_url}"',
+                tag,
+                count=1,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
 
-        def fix_css_url(m: re.Match) -> str:
+        def fix_css_url(m: re.Match[str]) -> str:
             inner = m.group(1).strip(" \"'")
             return f"url({absolutize(urljoin(css_url, inner))})"
 
@@ -93,17 +113,18 @@ def normalize(html: str) -> str:
     return html
 
 
-def main() -> None:
+def main() -> int:
     if len(sys.argv) != 3:
         print(f"Usage: {sys.argv[0]} <input.html> <output.html>", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
     raw_path = Path(sys.argv[1])
     out_path = Path(sys.argv[2])
     html = raw_path.read_text(encoding="utf-8", errors="replace")
     out_path.write_text(normalize(html), encoding="utf-8")
     print(f"Normalized HTML written to {out_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

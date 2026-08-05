@@ -10,6 +10,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install search dependencies
+        run: python3 -m pip install -U ddgs
+
       - name: Search DuckDuckGo and save HTML
         env:
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
@@ -26,44 +29,13 @@ jobs:
             exit 1
           fi
 
-          export QUESTION
-          ENCODED=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['QUESTION']))")
-
-          case "$TYPE" in
-            web)
-              URL="https://html.duckduckgo.com/html/?q=${ENCODED}"
-              ;;
-            images)
-              URL="https://html.duckduckgo.com/html/?q=${ENCODED}&iax=images&ia=images"
-              ;;
-            videos)
-              URL="https://html.duckduckgo.com/html/?q=${ENCODED}&iax=videos&ia=videos"
-              ;;
-            news)
-              URL="https://html.duckduckgo.com/html/?q=${ENCODED}&iar=news&ia=news"
-              ;;
-            *)
-              echo "Invalid type: $TYPE"
-              exit 1
-              ;;
-          esac
-
           mkdir -p output
-          RAW="output/raw-${TYPE}.html"
           OUT="output/duckduckgo-${TYPE}.html"
 
           echo "Question: $QUESTION"
           echo "Type: $TYPE"
-          echo "Fetching: $URL"
 
-          curl -fsSL \
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            -H "Accept: text/html,application/xhtml+xml" \
-            -o "$RAW" \
-            "$URL"
-
-          python3 .github/scripts/normalize_duckduckgo_html.py "$RAW" "$OUT"
-          rm -f "$RAW"
+          python3 .github/scripts/duckduckgo_search.py "$QUESTION" "$TYPE" "$OUT"
 
           echo "Saved: $OUT ($(wc -c < "$OUT") bytes)"
 
