@@ -34,7 +34,7 @@ jobs:
               --disable-dev-shm-usage \
               --disable-extensions \
               --disable-sync \
-                --window-size=854,480"
+                --window-size=480,640"
 
       - name: Start Cloudflare Tunnel
         run: |
