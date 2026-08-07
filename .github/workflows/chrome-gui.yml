@@ -1,4 +1,4 @@
-name: Chrome GUI with Xpra
+name: Chrome GUI with Xpra Audio
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Install packages
         run: |
           sudo apt update
@@ -15,12 +16,26 @@ jobs:
             chromium-browser \
             xpra \
             xvfb \
-            wget
+            wget \
+            pulseaudio \
+            pulseaudio-utils
 
       - name: Install Cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: Start Audio Server
+        run: |
+          pulseaudio --start --exit-idle-time=-1
+
+          pactl load-module module-null-sink \
+            sink_name=virtual_sink \
+            sink_properties=device.description=VirtualAudio
+
+          pactl set-default-sink virtual_sink
+
+          pactl info
 
       - name: Start Xpra
         run: |
@@ -31,6 +46,9 @@ jobs:
             --exit-with-children \
             --encoding=h264 \
             --quality=50 \
+            --speaker=on \
+            --microphone=on \
+            --pulseaudio=yes \
             --start-child="chromium-browser \
               --no-sandbox \
               --disable-dev-shm-usage \
@@ -56,6 +74,11 @@ jobs:
 
           echo "Tunnel URL:"
           grep -o "https://[-a-zA-Z0-9.]*trycloudflare.com" tunnel.log || true
+
+      - name: Debug Audio
+        run: |
+          pactl list short sinks
+          pactl list short sources
 
       - name: Keep Alive
         run: |
