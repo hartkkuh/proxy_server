@@ -36,8 +36,10 @@ jobs:
           pactl set-default-sink virtual_sink
           pactl set-default-source virtual_sink.monitor
 
-          echo "Audio devices:"
+          echo "=== PulseAudio sinks ==="
           pactl list short sinks
+
+          echo "=== PulseAudio sources ==="
           pactl list short sources
 
       - name: Start Xpra
@@ -52,7 +54,8 @@ jobs:
             --encoding=h264 \
             --quality=50 \
             --speaker=on \
-            --microphone=on \
+            --speaker-codec=opus \
+            --audio-source=pulse \
             --pulseaudio=yes \
             --keyboard-sync=yes \
             --start-child="env PULSE_SERVER=127.0.0.1 chromium-browser \
@@ -69,6 +72,12 @@ jobs:
               --renderer-process-limit=2 \
               --window-size=854,480"
 
+          sleep 5
+
+          echo "=== Xpra Audio Info ==="
+          xpra info :100 | grep -i audio || true
+          xpra info :100 | grep -i speaker || true
+
       - name: Start Cloudflare Tunnel
         run: |
           cloudflared tunnel \
@@ -77,10 +86,10 @@ jobs:
 
           sleep 10
 
-          echo "Tunnel URL:"
+          echo "=== Tunnel URL ==="
           grep -o "https://[-a-zA-Z0-9.]*trycloudflare.com" tunnel.log || true
 
-      - name: Audio Monitor
+      - name: Monitor Audio
         run: |
           while true; do
             echo "====== Audio Streams ======"
