@@ -1,4 +1,4 @@
-name: Chrome GUI with Xpra Audio
+name: Chrome GUI with Xpra
 
 on:
   workflow_dispatch:
@@ -8,7 +8,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Install packages
         run: |
           sudo apt update
@@ -16,35 +15,14 @@ jobs:
             chromium-browser \
             xpra \
             xvfb \
-            wget \
-            pulseaudio \
-            pulseaudio-utils
+            wget
 
       - name: Install Cloudflared
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-      - name: Start PulseAudio
-        run: |
-          pulseaudio --start --exit-idle-time=-1
-
-          pactl load-module module-null-sink \
-            sink_name=virtual_sink \
-            sink_properties=device.description=VirtualAudio
-
-          pactl set-default-sink virtual_sink
-          pactl set-default-source virtual_sink.monitor
-
-          echo "=== PulseAudio sinks ==="
-          pactl list short sinks
-
-          echo "=== PulseAudio sources ==="
-          pactl list short sources
-
       - name: Start Xpra
-        env:
-          PULSE_SERVER: 127.0.0.1
         run: |
           xpra start :100 \
             --bind-tcp=0.0.0.0:14500 \
@@ -53,12 +31,7 @@ jobs:
             --exit-with-children \
             --encoding=h264 \
             --quality=50 \
-            --speaker=on \
-            --speaker-codec=opus \
-            --audio-source=pulse \
-            --pulseaudio=yes \
-            --keyboard-sync=yes \
-            --start-child="env PULSE_SERVER=127.0.0.1 chromium-browser \
+            --start-child="chromium-browser \
               --no-sandbox \
               --disable-dev-shm-usage \
               --disable-extensions \
@@ -67,16 +40,11 @@ jobs:
               --disable-background-timer-throttling \
               --disable-renderer-backgrounding \
               --disable-component-update \
+              --disable-features=Translate,BackForwardCache \
               --no-first-run \
               --no-default-browser-check \
               --renderer-process-limit=2 \
               --window-size=854,480"
-
-          sleep 5
-
-          echo "=== Xpra Audio Info ==="
-          xpra info :100 | grep -i audio || true
-          xpra info :100 | grep -i speaker || true
 
       - name: Start Cloudflare Tunnel
         run: |
@@ -86,13 +54,9 @@ jobs:
 
           sleep 10
 
-          echo "=== Tunnel URL ==="
+          echo "Tunnel URL:"
           grep -o "https://[-a-zA-Z0-9.]*trycloudflare.com" tunnel.log || true
 
-      - name: Monitor Audio
+      - name: Keep Alive
         run: |
-          while true; do
-            echo "====== Audio Streams ======"
-            pactl list short sink-inputs || true
-            sleep 15
-          done
+          sleep 21600
