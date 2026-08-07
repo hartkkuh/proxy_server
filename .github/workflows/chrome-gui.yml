@@ -25,7 +25,7 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-      - name: Start Audio Server
+      - name: Start PulseAudio
         run: |
           pulseaudio --start --exit-idle-time=-1
 
@@ -34,10 +34,15 @@ jobs:
             sink_properties=device.description=VirtualAudio
 
           pactl set-default-sink virtual_sink
+          pactl set-default-source virtual_sink.monitor
 
-          pactl info
+          echo "Audio devices:"
+          pactl list short sinks
+          pactl list short sources
 
       - name: Start Xpra
+        env:
+          PULSE_SERVER: 127.0.0.1
         run: |
           xpra start :100 \
             --bind-tcp=0.0.0.0:14500 \
@@ -49,7 +54,8 @@ jobs:
             --speaker=on \
             --microphone=on \
             --pulseaudio=yes \
-            --start-child="chromium-browser \
+            --keyboard-sync=yes \
+            --start-child="env PULSE_SERVER=127.0.0.1 chromium-browser \
               --no-sandbox \
               --disable-dev-shm-usage \
               --disable-extensions \
@@ -58,7 +64,6 @@ jobs:
               --disable-background-timer-throttling \
               --disable-renderer-backgrounding \
               --disable-component-update \
-              --disable-features=Translate,BackForwardCache \
               --no-first-run \
               --no-default-browser-check \
               --renderer-process-limit=2 \
@@ -75,11 +80,10 @@ jobs:
           echo "Tunnel URL:"
           grep -o "https://[-a-zA-Z0-9.]*trycloudflare.com" tunnel.log || true
 
-      - name: Debug Audio
+      - name: Audio Monitor
         run: |
-          pactl list short sinks
-          pactl list short sources
-
-      - name: Keep Alive
-        run: |
-          sleep 21600
+          while true; do
+            echo "====== Audio Streams ======"
+            pactl list short sink-inputs || true
+            sleep 15
+          done
