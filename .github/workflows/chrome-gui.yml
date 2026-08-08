@@ -239,4 +239,3 @@ jobs:
           echo "The workflow will remain active for 6 hours."
 
           sleep 21600
-```
