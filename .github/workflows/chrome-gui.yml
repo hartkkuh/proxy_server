@@ -1,4 +1,5 @@
-name: Chrome GUI with Xpra
+```yaml
+name: Chrome GUI with Xpra + 1clickVPN
 
 on:
   workflow_dispatch:
@@ -8,22 +9,191 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ==========================================
+      # התקנת Chromium + Xpra + כלים
+      # ==========================================
       - name: Install packages
         run: |
           sudo apt update
+
           sudo apt install -y \
             chromium-browser \
             xpra \
             xvfb \
-            wget
+            wget \
+            curl \
+            python3
 
+      # ==========================================
+      # התקנת Cloudflared
+      # ==========================================
       - name: Install Cloudflared
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          wget -q \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+
           sudo dpkg -i cloudflared-linux-amd64.deb
 
+      # ==========================================
+      # הורדת 1clickVPN מה-Chrome Web Store
+      # ==========================================
+      - name: Download 1clickVPN extension
+        run: |
+
+          mkdir -p "$HOME/extensions/1clickvpn"
+
+          EXTENSION_ID="fcfhplploccackoneaefokcmbjfbkenj"
+
+          echo "Downloading 1clickVPN..."
+
+          curl -L \
+            "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=150.0.7871.128&x=id%3D${EXTENSION_ID}%26installsource%3Dondemand%26uc" \
+            -o "$HOME/1clickvpn.crx"
+
+          echo "Downloaded file:"
+          ls -lh "$HOME/1clickvpn.crx"
+
+      # ==========================================
+      # חילוץ CRX -> תיקיית Extension
+      # ==========================================
+      - name: Extract Chrome extension
+        run: |
+
+          python3 << 'PY'
+          import struct
+          import zipfile
+          from pathlib import Path
+
+          crx = Path.home() / "1clickvpn.crx"
+          output = Path.home() / "extensions" / "1clickvpn"
+
+          data = crx.read_bytes()
+
+          print("CRX size:", len(data))
+
+          # CRX3
+          if data[:4] == b"Cr24":
+
+              version = struct.unpack("<I", data[4:8])[0]
+
+              print("CRX version:", version)
+
+              if version == 3:
+
+                  header_size = struct.unpack(
+                      "<I",
+                      data[8:12]
+                  )[0]
+
+                  zip_start = 12 + header_size
+
+                  zip_data = data[zip_start:]
+
+                  temp_zip = output.parent / "extension.zip"
+
+                  temp_zip.write_bytes(zip_data)
+
+                  print("ZIP size:", len(zip_data))
+
+                  with zipfile.ZipFile(temp_zip, "r") as z:
+                      z.extractall(output)
+
+                  temp_zip.unlink()
+
+              elif version == 2:
+
+                  public_key_size = struct.unpack(
+                      "<I",
+                      data[8:12]
+                  )[0]
+
+                  signature_size = struct.unpack(
+                      "<I",
+                      data[12:16]
+                  )[0]
+
+                  zip_start = (
+                      16
+                      + public_key_size
+                      + signature_size
+                  )
+
+                  zip_data = data[zip_start:]
+
+                  temp_zip = output.parent / "extension.zip"
+
+                  temp_zip.write_bytes(zip_data)
+
+                  with zipfile.ZipFile(temp_zip, "r") as z:
+                      z.extractall(output)
+
+                  temp_zip.unlink()
+
+              else:
+                  raise RuntimeError(
+                      f"Unsupported CRX version: {version}"
+                  )
+
+          else:
+              raise RuntimeError(
+                  "Downloaded file is not a CRX file"
+              )
+
+          manifest = output / "manifest.json"
+
+          if not manifest.exists():
+              raise RuntimeError(
+                  "manifest.json was not found"
+              )
+
+          print()
+          print("Extension successfully extracted.")
+          print("Extension directory:", output)
+          print("Manifest:", manifest)
+
+          PY
+
+          echo
+          echo "Extension files:"
+          find "$HOME/extensions/1clickvpn" -maxdepth 2 -type f | head -50
+
+      # ==========================================
+      # יצירת סקריפט להפעלת Chromium
+      # ==========================================
+      - name: Create Chromium launcher
+        run: |
+
+          cat > "$HOME/start-chromium.sh" << 'EOF'
+          #!/bin/bash
+
+          chromium-browser \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --disable-sync \
+            --disable-background-networking \
+            --disable-background-timer-throttling \
+            --disable-renderer-backgrounding \
+            --disable-component-update \
+            --disable-features=Translate,BackForwardCache \
+            --no-first-run \
+            --no-default-browser-check \
+            --renderer-process-limit=2 \
+            --window-size=854,480 \
+            --load-extension="$HOME/extensions/1clickvpn"
+          EOF
+
+          chmod +x "$HOME/start-chromium.sh"
+
+          echo "Chromium launcher:"
+          cat "$HOME/start-chromium.sh"
+
+      # ==========================================
+      # הפעלת Xpra + Chromium
+      # ==========================================
       - name: Start Xpra
         run: |
+
           xpra start :100 \
             --bind-tcp=0.0.0.0:14500 \
             --html=on \
@@ -31,32 +201,67 @@ jobs:
             --exit-with-children \
             --encoding=h264 \
             --quality=50 \
-            --start-child="chromium-browser \
-              --no-sandbox \
-              --disable-dev-shm-usage \
-              --disable-extensions \
-              --disable-sync \
-              --disable-background-networking \
-              --disable-background-timer-throttling \
-              --disable-renderer-backgrounding \
-              --disable-component-update \
-              --disable-features=Translate,BackForwardCache \
-              --no-first-run \
-              --no-default-browser-check \
-              --renderer-process-limit=2 \
-              --window-size=854,480"
+            --speaker=on \
+            --speaker-codec=opus \
+            --audio-source=pulse \
+            --pulseaudio=yes \
+            --keyboard-sync=yes \
+            --start-child="$HOME/start-chromium.sh"
 
+          echo "Xpra started."
+
+          sleep 10
+
+      # ==========================================
+      # בדיקה שה-Chromium עדיין רץ
+      # ==========================================
+      - name: Check Chromium
+        run: |
+
+          echo "Running Chromium processes:"
+          ps aux | grep chromium | grep -v grep || true
+
+          echo
+          echo "Xpra processes:"
+          ps aux | grep xpra | grep -v grep || true
+
+      # ==========================================
+      # Cloudflare Tunnel
+      # ==========================================
       - name: Start Cloudflare Tunnel
         run: |
+
           cloudflared tunnel \
             --url http://localhost:14500 \
             > tunnel.log 2>&1 &
 
           sleep 10
 
-          echo "Tunnel URL:"
-          grep -o "https://[-a-zA-Z0-9.]*trycloudflare.com" tunnel.log || true
+          echo
+          echo "=========================================="
+          echo "        CLOUDFLARE TUNNEL URL"
+          echo "=========================================="
+          echo
 
+          grep -o \
+            "https://[-a-zA-Z0-9.]*trycloudflare.com" \
+            tunnel.log || true
+
+          echo
+          echo "=========================================="
+          echo
+
+          echo "Cloudflared log:"
+          cat tunnel.log
+
+      # ==========================================
+      # השארת ה-GitHub Action בחיים
+      # ==========================================
       - name: Keep Alive
         run: |
+
+          echo "Chrome GUI is running."
+          echo "The workflow will remain active for 6 hours."
+
           sleep 21600
+```
