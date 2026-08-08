@@ -1,4 +1,3 @@
-```yaml
 name: Chrome GUI with Xpra + 1clickVPN
 
 on:
@@ -10,9 +9,6 @@ jobs:
 
     steps:
 
-      # ==========================================
-      # התקנת Chromium + Xpra + כלים
-      # ==========================================
       - name: Install packages
         run: |
           sudo apt update
@@ -25,9 +21,6 @@ jobs:
             curl \
             python3
 
-      # ==========================================
-      # התקנת Cloudflared
-      # ==========================================
       - name: Install Cloudflared
         run: |
           wget -q \
@@ -35,9 +28,6 @@ jobs:
 
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-      # ==========================================
-      # הורדת 1clickVPN מה-Chrome Web Store
-      # ==========================================
       - name: Download 1clickVPN extension
         run: |
 
@@ -54,9 +44,6 @@ jobs:
           echo "Downloaded file:"
           ls -lh "$HOME/1clickvpn.crx"
 
-      # ==========================================
-      # חילוץ CRX -> תיקיית Extension
-      # ==========================================
       - name: Extract Chrome extension
         run: |
 
@@ -158,9 +145,6 @@ jobs:
           echo "Extension files:"
           find "$HOME/extensions/1clickvpn" -maxdepth 2 -type f | head -50
 
-      # ==========================================
-      # יצירת סקריפט להפעלת Chromium
-      # ==========================================
       - name: Create Chromium launcher
         run: |
 
@@ -188,9 +172,6 @@ jobs:
           echo "Chromium launcher:"
           cat "$HOME/start-chromium.sh"
 
-      # ==========================================
-      # הפעלת Xpra + Chromium
-      # ==========================================
       - name: Start Xpra
         run: |
 
@@ -212,9 +193,6 @@ jobs:
 
           sleep 10
 
-      # ==========================================
-      # בדיקה שה-Chromium עדיין רץ
-      # ==========================================
       - name: Check Chromium
         run: |
 
@@ -254,9 +232,6 @@ jobs:
           echo "Cloudflared log:"
           cat tunnel.log
 
-      # ==========================================
-      # השארת ה-GitHub Action בחיים
-      # ==========================================
       - name: Keep Alive
         run: |
 
