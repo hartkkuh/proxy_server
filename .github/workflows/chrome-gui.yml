@@ -32,7 +32,6 @@ jobs:
             --encoding=h264 \
             --quality=50 \
             --start-child="chromium-browser \
-              --no-sandbox \
               --disable-dev-shm-usage \
               --disable-extensions \
               --disable-sync \
