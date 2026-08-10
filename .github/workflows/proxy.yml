@@ -1,4 +1,4 @@
-name: GitHub Actions Proxy VPS
+name: Linux Proxy VPS
 
 on:
   workflow_dispatch:
@@ -7,69 +7,61 @@ jobs:
   proxy:
     runs-on: ubuntu-latest
 
-    # GitHub-hosted runner מוגבל בזמן.
     timeout-minutes: 350
 
     steps:
 
-      # ============================================================
-      # 1. Install Squid
-      # ============================================================
+      # ==========================================
+      # Install Squid
+      # ==========================================
       - name: Install Squid
         run: |
-          set -e
+          sudo apt update
 
-          sudo apt-get update
-          sudo apt-get install -y squid curl
+          sudo apt install -y \
+            squid \
+            curl
 
           squid --version
 
-      # ============================================================
-      # 2. Configure Squid
-      # ============================================================
+      # ==========================================
+      # Configure Squid
+      # ==========================================
       - name: Configure Squid
         run: |
-          set -e
+          sudo cp /etc/squid/squid.conf /etc/squid/squid.conf.backup
 
           sudo tee /etc/squid/squid.conf > /dev/null <<'EOF'
-
-          # HTTP proxy port
           http_port 3128
 
-          # Allow connections
           acl all src all
           http_access allow all
 
-          # Disable cache
           cache deny all
 
-          # Reduce logging
           access_log none
+          cache_log /var/log/squid/cache.log
 
-          # Do not expose proxy forwarding information
           forwarded_for delete
           via off
 
           request_header_access X-Forwarded-For deny all
           request_header_access Via deny all
-
+          request_header_access Cache-Control deny all
           EOF
 
           sudo squid -k parse
 
           sudo systemctl restart squid
 
-          echo "Squid status:"
-          sudo systemctl status squid --no-pager
+          sudo systemctl enable squid
 
-      # ============================================================
-      # 3. Test local proxy
-      # ============================================================
-      - name: Test Squid
+      # ==========================================
+      # Test Proxy
+      # ==========================================
+      - name: Test Proxy
         run: |
-          set -e
-
-          echo "Testing proxy..."
+          echo "Testing Squid..."
 
           curl \
             --proxy http://127.0.0.1:3128 \
@@ -78,19 +70,15 @@ jobs:
             https://example.com
 
           echo ""
-          echo "Squid works."
+          echo "Squid is working."
 
-      # ============================================================
-      # 4. Install cloudflared
-      # ============================================================
-      - name: Install cloudflared
+      # ==========================================
+      # Install Cloudflared
+      # ==========================================
+      - name: Install Cloudflared
         run: |
-          set -e
-
           curl -L \
             --fail \
-            --silent \
-            --show-error \
             -o cloudflared.deb \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
 
@@ -98,129 +86,98 @@ jobs:
 
           cloudflared --version
 
-      # ============================================================
-      # 5. Check Cloudflare secret
-      # ============================================================
-      - name: Check Cloudflare Token
+      # ==========================================
+      # Start Cloudflare Tunnel
+      # ==========================================
+      - name: Start Cloudflare Tunnel
         env:
           CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
           if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
             echo ""
-            echo "=============================================="
-            echo "ERROR: CLOUDFLARE_TUNNEL_TOKEN is missing."
-            echo "=============================================="
-            echo ""
-            echo "Create this GitHub repository secret:"
-            echo ""
-            echo "CLOUDFLARE_TUNNEL_TOKEN"
+            echo "ERROR:"
+            echo "CLOUDFLARE_TUNNEL_TOKEN is missing."
             echo ""
             exit 1
           fi
-
-          echo "Cloudflare token exists."
-
-      # ============================================================
-      # 6. Start Cloudflare Tunnel
-      # ============================================================
-      - name: Start Cloudflare Tunnel
-        env:
-          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
-        run: |
-          set -e
 
           echo "Starting Cloudflare Tunnel..."
 
           nohup cloudflared tunnel run \
             --token "$CLOUDFLARE_TUNNEL_TOKEN" \
-            > cloudflared.log 2>&1 &
+            > tunnel.log 2>&1 &
 
-          CLOUDFLARED_PID=$!
-
-          echo "$CLOUDFLARED_PID" > cloudflared.pid
-
-          echo "cloudflared PID: $CLOUDFLARED_PID"
+          echo $! > tunnel.pid
 
           sleep 10
 
           echo ""
-          echo "Cloudflare log:"
-          cat cloudflared.log || true
+          echo "=========================================="
+          echo "Cloudflare Tunnel"
+          echo "=========================================="
 
-          if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+          cat tunnel.log
+
+          if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
             echo ""
-            echo "ERROR: cloudflared stopped."
+            echo "Cloudflare Tunnel failed."
             exit 1
           fi
 
           echo ""
-          echo "=============================================="
-          echo "Cloudflare Tunnel is running."
-          echo "=============================================="
+          echo "Tunnel is running."
 
-      # ============================================================
-      # 7. Display Windows instructions
-      # ============================================================
-      - name: Show Windows configuration
+      # ==========================================
+      # Show Proxy Information
+      # ==========================================
+      - name: Show Proxy Information
         run: |
           echo ""
-          echo "======================================================"
-          echo "             PROXY IS READY"
-          echo "======================================================"
+          echo "=============================================="
+          echo "             PROXY VPS READY"
+          echo "=============================================="
           echo ""
-          echo "Cloudflare Tunnel is connected to:"
-          echo ""
+          echo "Squid:"
           echo "    127.0.0.1:3128"
           echo ""
-          echo "    Windows must run:"
+          echo "Cloudflare:"
+          echo "    Tunnel is connected"
           echo ""
-          echo "    cloudflared access tcp --hostname YOUR_HOSTNAME --url 127.0.0.1:3128"
+          echo "On Windows run cloudflared access tcp"
+          echo "to create a local connection."
           echo ""
-          echo "Then configure Windows proxy:"
+          echo "Then configure Windows:"
           echo ""
           echo "    Address: 127.0.0.1"
           echo "    Port:    3128"
           echo ""
-          echo "======================================================"
+          echo "=============================================="
 
-      # ============================================================
-      # 8. Keep runner alive
-      # ============================================================
-      - name: Keep Proxy Alive
+      # ==========================================
+      # Keep Alive
+      # ==========================================
+      - name: Keep Alive
         run: |
           echo ""
-          echo "======================================================"
-          echo "GitHub Actions Proxy VPS is running"
-          echo "======================================================"
+          echo "Proxy VPS is running."
           echo ""
 
-          while true; do
-
+          while true
+          do
             sleep 60
 
-            # Check Squid
-            if ! sudo systemctl is-active --quiet squid; then
-              echo "Squid stopped. Restarting..."
+            if ! sudo systemctl is-active --quiet squid
+            then
+              echo "Squid stopped - restarting..."
               sudo systemctl restart squid
             fi
 
-            # Check cloudflared
-            if [ ! -f cloudflared.pid ]; then
-              echo "cloudflared PID file missing."
+            if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null
+            then
+              echo "Cloudflare Tunnel stopped."
+              cat tunnel.log || true
               exit 1
             fi
 
-            CLOUDFLARED_PID=$(cat cloudflared.pid)
-
-            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-              echo ""
-              echo "cloudflared stopped."
-              echo ""
-              echo "Cloudflare log:"
-              cat cloudflared.log || true
-              exit 1
-            fi
-
-            echo "[$(date)] Proxy alive"
-
+            echo "[$(date)] VPS alive"
           done
