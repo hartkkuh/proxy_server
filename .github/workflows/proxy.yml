@@ -1,4 +1,4 @@
-name: Linux Proxy VPS
+name: GitHub Actions Proxy VPS
 
 on:
   workflow_dispatch:
@@ -11,56 +11,80 @@ jobs:
 
     steps:
 
-      # ==========================================
-      # Install Squid
-      # ==========================================
-      - name: Install Squid
+      # ============================================================
+      # Install packages
+      # ============================================================
+      - name: Install packages
         run: |
-          sudo apt update
+          set -e
 
-          sudo apt install -y \
+          sudo apt-get update
+
+          sudo apt-get install -y \
             squid \
-            curl
+            curl \
+            wget \
+            python3 \
+            python3-pip
 
-          squid --version
+      # ============================================================
+      # Install websockify
+      # ============================================================
+      - name: Install websockify
+        run: |
+          set -e
 
-      # ==========================================
+          python3 -m pip install --break-system-packages websockify
+
+          websockify --help | head
+
+      # ============================================================
       # Configure Squid
-      # ==========================================
+      # ============================================================
       - name: Configure Squid
         run: |
-          sudo cp /etc/squid/squid.conf /etc/squid/squid.conf.backup
+          set -e
 
           sudo tee /etc/squid/squid.conf > /dev/null <<'EOF'
-          http_port 3128
 
-          acl all src all
-          http_access allow all
+          # Squid listens only locally.
+          # websockify will expose it through WebSocket.
+
+          http_port 127.0.0.1:3128
+
+          # Allow local connections.
+          acl localhost src 127.0.0.1/32
+          http_access allow localhost
+
+          # Deny everything else.
+          http_access deny all
 
           cache deny all
 
           access_log none
-          cache_log /var/log/squid/cache.log
 
           forwarded_for delete
           via off
 
           request_header_access X-Forwarded-For deny all
           request_header_access Via deny all
-          request_header_access Cache-Control deny all
+
           EOF
 
           sudo squid -k parse
-
           sudo systemctl restart squid
 
-          sudo systemctl enable squid
+          echo ""
+          echo "Squid:"
+          sudo systemctl status squid --no-pager
 
-      # ==========================================
-      # Test Proxy
-      # ==========================================
-      - name: Test Proxy
+      # ============================================================
+      # Test Squid
+      # ============================================================
+      - name: Test Squid
         run: |
+          set -e
+
           echo "Testing Squid..."
 
           curl \
@@ -70,15 +94,52 @@ jobs:
             https://example.com
 
           echo ""
-          echo "Squid is working."
+          echo "Squid works."
 
-      # ==========================================
+      # ============================================================
+      # Start WebSocket -> TCP bridge
+      #
+      # Public WebSocket port:
+      #     8080
+      #
+      # Destination:
+      #     127.0.0.1:3128
+      # ============================================================
+      - name: Start WebSocket bridge
+        run: |
+          set -e
+
+          nohup websockify \
+            --web=none \
+            0.0.0.0:8080 \
+            127.0.0.1:3128 \
+            > websockify.log 2>&1 &
+
+          echo $! > websockify.pid
+
+          sleep 3
+
+          if ! kill -0 "$(cat websockify.pid)" 2>/dev/null; then
+            echo "websockify failed:"
+            cat websockify.log
+            exit 1
+          fi
+
+          echo ""
+          echo "WebSocket bridge is running:"
+          echo "0.0.0.0:8080 -> 127.0.0.1:3128"
+
+      # ============================================================
       # Install Cloudflared
-      # ==========================================
+      # ============================================================
       - name: Install Cloudflared
         run: |
+          set -e
+
           curl -L \
             --fail \
+            --silent \
+            --show-error \
             -o cloudflared.deb \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
 
@@ -86,98 +147,132 @@ jobs:
 
           cloudflared --version
 
-      # ==========================================
-      # Start Cloudflare Tunnel
-      # ==========================================
-      - name: Start Cloudflare Tunnel
-        env:
-          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+      # ============================================================
+      # Start Cloudflare Quick Tunnel
+      # ============================================================
+      - name: Start Cloudflare Quick Tunnel
         run: |
-          if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-            echo ""
-            echo "ERROR:"
-            echo "CLOUDFLARE_TUNNEL_TOKEN is missing."
-            echo ""
-            exit 1
-          fi
+          set -e
 
-          echo "Starting Cloudflare Tunnel..."
+          rm -f tunnel.log
 
-          nohup cloudflared tunnel run \
-            --token "$CLOUDFLARE_TUNNEL_TOKEN" \
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:8080 \
+            --no-autoupdate \
             > tunnel.log 2>&1 &
 
           echo $! > tunnel.pid
 
-          sleep 10
-
           echo ""
-          echo "=========================================="
-          echo "Cloudflare Tunnel"
-          echo "=========================================="
+          echo "Waiting for Cloudflare..."
 
-          cat tunnel.log
+          TUNNEL_URL=""
 
-          if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
+          for i in {1..60}; do
+
+            TUNNEL_URL=$(
+              grep -oE \
+                'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+                tunnel.log 2>/dev/null |
+              head -n 1 ||
+              true
+            )
+
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+
+            echo "Waiting... $i/60"
+
+            sleep 2
+
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+
             echo ""
-            echo "Cloudflare Tunnel failed."
+            echo "ERROR: Cloudflare URL was not found."
+            echo ""
+
+            cat tunnel.log
+
             exit 1
+
           fi
 
-          echo ""
-          echo "Tunnel is running."
+          # Convert HTTPS URL to WebSocket URL.
+          WS_URL="${TUNNEL_URL/https:/wss:}"
 
-      # ==========================================
-      # Show Proxy Information
-      # ==========================================
-      - name: Show Proxy Information
+          echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
+          echo "WS_URL=$WS_URL" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "=================================================="
+          echo "             PROXY IS READY"
+          echo "=================================================="
+          echo ""
+          echo "Cloudflare URL:"
+          echo ""
+          echo "$TUNNEL_URL"
+          echo ""
+          echo "WebSocket URL:"
+          echo ""
+          echo "$WS_URL"
+          echo ""
+          echo "=================================================="
+
+      # ============================================================
+      # Show Windows instructions
+      # ============================================================
+      - name: Show Windows instructions
         run: |
           echo ""
-          echo "=============================================="
-          echo "             PROXY VPS READY"
-          echo "=============================================="
+          echo "=================================================="
+          echo "WINDOWS CONFIGURATION"
+          echo "=================================================="
           echo ""
-          echo "Squid:"
-          echo "    127.0.0.1:3128"
+          echo "Cloudflare WebSocket:"
+          echo "$WS_URL"
           echo ""
-          echo "Cloudflare:"
-          echo "    Tunnel is connected"
+          echo "Windows local proxy:"
           echo ""
-          echo "On Windows run cloudflared access tcp"
-          echo "to create a local connection."
+          echo "Address: 127.0.0.1"
+          echo "Port:    3128"
           echo ""
-          echo "Then configure Windows:"
+          echo "=================================================="
           echo ""
-          echo "    Address: 127.0.0.1"
-          echo "    Port:    3128"
+          echo "IMPORTANT:"
           echo ""
-          echo "=============================================="
+          echo "The GitHub Actions job must remain running."
+          echo ""
+          echo "=================================================="
 
-      # ==========================================
-      # Keep Alive
-      # ==========================================
+      # ============================================================
+      # Keep alive
+      # ============================================================
       - name: Keep Alive
         run: |
-          echo ""
-          echo "Proxy VPS is running."
-          echo ""
+          while true; do
 
-          while true
-          do
             sleep 60
 
-            if ! sudo systemctl is-active --quiet squid
-            then
-              echo "Squid stopped - restarting..."
+            if ! sudo systemctl is-active --quiet squid; then
+              echo "Squid stopped."
               sudo systemctl restart squid
             fi
 
-            if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null
-            then
+            if ! kill -0 "$(cat websockify.pid)" 2>/dev/null; then
+              echo "websockify stopped."
+              cat websockify.log || true
+              exit 1
+            fi
+
+            if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
               echo "Cloudflare Tunnel stopped."
               cat tunnel.log || true
               exit 1
             fi
 
-            echo "[$(date)] VPS alive"
+            echo "[$(date)] Proxy VPS alive"
+
           done
