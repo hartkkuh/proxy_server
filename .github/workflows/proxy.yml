@@ -6,14 +6,23 @@ on:
 jobs:
   proxy:
     runs-on: ubuntu-latest
+
+    # GitHub-hosted runner מוגבל בזמן הרצה.
     timeout-minutes: 360
 
     steps:
+
+      # ==========================================
+      # Install Squid
+      # ==========================================
       - name: Install Squid
         run: |
           sudo apt-get update
           sudo apt-get install -y squid curl
 
+      # ==========================================
+      # Configure Squid
+      # ==========================================
       - name: Configure Squid
         run: |
           sudo tee /etc/squid/squid.conf > /dev/null <<'EOF'
@@ -29,24 +38,36 @@ jobs:
 
           forwarded_for delete
           via off
+
           request_header_access X-Forwarded-For deny all
           request_header_access Via deny all
           request_header_access Cache-Control deny all
           EOF
 
           sudo systemctl restart squid
+
+          echo "Squid status:"
           sudo systemctl status squid --no-pager
 
+      # ==========================================
+      # Test Squid locally
+      # ==========================================
       - name: Test local proxy
         run: |
+          echo "Testing local proxy..."
+
           curl -I \
-            -x http://127.0.0.1:3128 \
+            --proxy http://127.0.0.1:3128 \
+            --max-time 20 \
             https://example.com
 
+      # ==========================================
+      # Install ngrok
+      # ==========================================
       - name: Install ngrok
         run: |
           curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null
 
           echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" \
             | sudo tee /etc/apt/sources.list.d/ngrok.list
@@ -54,77 +75,229 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ngrok
 
+          ngrok version
+
+      # ==========================================
+      # Configure ngrok
+      # ==========================================
       - name: Configure ngrok
         env:
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
+          if [ -z "$NGROK_AUTHTOKEN" ]; then
+            echo "=============================================="
+            echo "ERROR: NGROK_AUTHTOKEN is missing!"
+            echo "=============================================="
+            echo ""
+            echo "Create this repository secret:"
+            echo "NGROK_AUTHTOKEN"
+            echo ""
+            exit 1
+          fi
+
           ngrok config add-authtoken "$NGROK_AUTHTOKEN"
 
+          echo "ngrok authentication configured successfully."
+
+      # ==========================================
+      # Start ngrok TCP tunnel
+      # ==========================================
       - name: Start TCP tunnel
         run: |
-          nohup ngrok tcp 3128 --log=stdout > ngrok.log 2>&1 &
-          sleep 5
+          echo "Starting ngrok..."
 
-          cat ngrok.log
+          nohup ngrok tcp 3128 \
+            --log=stdout \
+            > ngrok.log 2>&1 &
 
-      - name: Get proxy address
-        run: |
+          NGROK_PID=$!
+          echo "$NGROK_PID" > ngrok.pid
+
+          echo "ngrok PID: $NGROK_PID"
+
+          echo ""
+          echo "Waiting for ngrok tunnel..."
+
+          rm -f /tmp/ngrok.json
+
           for i in {1..30}; do
-            RESPONSE=$(curl -s http://127.0.0.1:4040/api/tunnels || true)
 
-            if echo "$RESPONSE" | grep -q "tcp://"; then
-              break
+            RESPONSE=$(curl -fsS \
+              --max-time 5 \
+              http://127.0.0.1:4040/api/tunnels \
+              2>/dev/null || true)
+
+            if [ -n "$RESPONSE" ]; then
+
+              echo "$RESPONSE" > /tmp/ngrok.json
+
+              if echo "$RESPONSE" | grep -q '"public_url"'; then
+                echo ""
+                echo "ngrok tunnel is ready!"
+                break
+              fi
+
             fi
 
+            if grep -q "ERR_NGROK_4018" ngrok.log 2>/dev/null; then
+              echo ""
+              echo "=============================================="
+              echo "ERROR: ngrok authentication failed."
+              echo "=============================================="
+              echo ""
+
+              cat ngrok.log
+
+              exit 1
+            fi
+
+            echo "Waiting... ($i/30)"
             sleep 2
           done
 
-          echo ""
-          echo "=============================================="
-          echo "           WINDOWS PROXY INFORMATION"
-          echo "=============================================="
-          echo ""
+          if [ ! -s /tmp/ngrok.json ]; then
 
-          curl -s http://127.0.0.1:4040/api/tunnels \
-            | python3 -c '
-          import sys, json
+            echo ""
+            echo "=============================================="
+            echo "ERROR: ngrok tunnel did not start."
+            echo "=============================================="
+            echo ""
 
-          data=json.load(sys.stdin)
+            cat ngrok.log
 
-          for tunnel in data.get("tunnels", []):
-              public=tunnel.get("public_url","")
+            exit 1
+          fi
 
-              if public.startswith("tcp://"):
-                  address=public.replace("tcp://","")
-                  host,port=address.rsplit(":",1)
+      # ==========================================
+      # Get public Proxy address
+      # ==========================================
+      - name: Get proxy address
+        run: |
+          python3 <<'PY'
+          import json
+          import sys
+
+          try:
+              with open("/tmp/ngrok.json", "r") as f:
+                  data = json.load(f)
+          except Exception as e:
+              print("ERROR: Cannot read ngrok API response.")
+              print(e)
+              sys.exit(1)
+
+          tunnels = data.get("tunnels", [])
+
+          if not tunnels:
+              print("ERROR: No tunnels found.")
+              print(json.dumps(data, indent=2))
+              sys.exit(1)
+
+          found = False
+
+          for tunnel in tunnels:
+
+              public_url = tunnel.get("public_url", "")
+
+              if public_url.startswith("tcp://"):
+
+                  address = public_url[len("tcp://"):]
+
+                  try:
+                      host, port = address.rsplit(":", 1)
+                  except ValueError:
+                      continue
+
+                  print("")
+                  print("==============================================")
+                  print("           WINDOWS PROXY INFORMATION")
+                  print("==============================================")
+                  print("")
 
                   print("Proxy address:")
                   print(host)
+
                   print("")
                   print("Proxy port:")
                   print(port)
+
                   print("")
-                  print("Windows:")
-                  print("Settings -> Network & Internet -> Proxy")
-                  print("Manual proxy -> ON")
-                  print("Address:",host)
-                  print("Port:",port)
-          '
+                  print("----------------------------------------------")
+                  print("Windows 11:")
+                  print("----------------------------------------------")
+                  print("")
+                  print("Settings")
+                  print("  -> Network & Internet")
+                  print("  -> Proxy")
+                  print("  -> Manual proxy setup")
+                  print("  -> Use a proxy server: ON")
+                  print("")
+                  print("Address:", host)
+                  print("Port:", port)
+                  print("")
 
-          echo ""
-          echo "=============================================="
+                  print("==============================================")
 
+                  found = True
+                  break
+
+          if not found:
+
+              print("ERROR: TCP tunnel was not found.")
+
+              print("")
+              print("Available tunnels:")
+
+              for tunnel in tunnels:
+                  print(
+                      tunnel.get("proto", ""),
+                      tunnel.get("public_url", "")
+                  )
+
+              sys.exit(1)
+
+          PY
+
+      # ==========================================
+      # Keep Proxy alive
+      # ==========================================
       - name: Keep proxy alive
         run: |
-          echo "Proxy is running..."
-          echo "GitHub Actions runner will keep the proxy alive."
+          echo ""
+          echo "=============================================="
+          echo "Proxy is running."
+          echo "=============================================="
+          echo ""
+          echo "Do NOT stop this workflow while using the proxy."
           echo ""
 
           while true; do
+
             sleep 60
 
-            if ! systemctl is-active --quiet squid; then
-              echo "Squid stopped - restarting..."
+            # Check Squid
+            if ! sudo systemctl is-active --quiet squid; then
+              echo "Squid stopped. Restarting..."
               sudo systemctl restart squid
             fi
+
+            # Check ngrok
+            if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
+              echo "ngrok stopped."
+
+              echo ""
+              echo "ngrok log:"
+              cat ngrok.log || true
+
+              exit 1
+            fi
+
+            # Check tunnel API
+            if ! curl -fsS \
+              --max-time 5 \
+              http://127.0.0.1:4040/api/tunnels \
+              > /dev/null 2>&1; then
+
+              echo "WARNING: ngrok API is unavailable."
+            fi
+
           done
