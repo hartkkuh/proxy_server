@@ -1,4 +1,4 @@
-name: Internet Proxy
+name: GitHub Actions Proxy VPS
 
 on:
   workflow_dispatch:
@@ -7,267 +7,191 @@ jobs:
   proxy:
     runs-on: ubuntu-latest
 
-    # GitHub-hosted runner מוגבל בזמן הרצה.
-    timeout-minutes: 360
+    # GitHub-hosted runner מוגבל בזמן.
+    timeout-minutes: 350
 
     steps:
 
-      # ==========================================
-      # Install Squid
-      # ==========================================
+      # ============================================================
+      # 1. Install Squid
+      # ============================================================
       - name: Install Squid
         run: |
+          set -e
+
           sudo apt-get update
           sudo apt-get install -y squid curl
 
-      # ==========================================
-      # Configure Squid
-      # ==========================================
+          squid --version
+
+      # ============================================================
+      # 2. Configure Squid
+      # ============================================================
       - name: Configure Squid
         run: |
+          set -e
+
           sudo tee /etc/squid/squid.conf > /dev/null <<'EOF'
+
+          # HTTP proxy port
           http_port 3128
 
+          # Allow connections
           acl all src all
           http_access allow all
 
+          # Disable cache
           cache deny all
 
+          # Reduce logging
           access_log none
-          cache_log /var/log/squid/cache.log
 
+          # Do not expose proxy forwarding information
           forwarded_for delete
           via off
 
           request_header_access X-Forwarded-For deny all
           request_header_access Via deny all
-          request_header_access Cache-Control deny all
+
           EOF
+
+          sudo squid -k parse
 
           sudo systemctl restart squid
 
           echo "Squid status:"
           sudo systemctl status squid --no-pager
 
-      # ==========================================
-      # Test Squid locally
-      # ==========================================
-      - name: Test local proxy
+      # ============================================================
+      # 3. Test local proxy
+      # ============================================================
+      - name: Test Squid
         run: |
-          echo "Testing local proxy..."
+          set -e
 
-          curl -I \
+          echo "Testing proxy..."
+
+          curl \
             --proxy http://127.0.0.1:3128 \
             --max-time 20 \
+            -I \
             https://example.com
 
-      # ==========================================
-      # Install ngrok
-      # ==========================================
-      - name: Install ngrok
+          echo ""
+          echo "Squid works."
+
+      # ============================================================
+      # 4. Install cloudflared
+      # ============================================================
+      - name: Install cloudflared
         run: |
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null
+          set -e
 
-          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" \
-            | sudo tee /etc/apt/sources.list.d/ngrok.list
+          curl -L \
+            --fail \
+            --silent \
+            --show-error \
+            -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
 
-          sudo apt-get update
-          sudo apt-get install -y ngrok
+          sudo dpkg -i cloudflared.deb
 
-          ngrok version
+          cloudflared --version
 
-      # ==========================================
-      # Configure ngrok
-      # ==========================================
-      - name: Configure ngrok
+      # ============================================================
+      # 5. Check Cloudflare secret
+      # ============================================================
+      - name: Check Cloudflare Token
         env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
-          if [ -z "$NGROK_AUTHTOKEN" ]; then
+          if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+            echo ""
             echo "=============================================="
-            echo "ERROR: NGROK_AUTHTOKEN is missing!"
+            echo "ERROR: CLOUDFLARE_TUNNEL_TOKEN is missing."
             echo "=============================================="
             echo ""
-            echo "Create this repository secret:"
-            echo "NGROK_AUTHTOKEN"
+            echo "Create this GitHub repository secret:"
+            echo ""
+            echo "CLOUDFLARE_TUNNEL_TOKEN"
             echo ""
             exit 1
           fi
 
-          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+          echo "Cloudflare token exists."
 
-          echo "ngrok authentication configured successfully."
-
-      # ==========================================
-      # Start ngrok TCP tunnel
-      # ==========================================
-      - name: Start TCP tunnel
+      # ============================================================
+      # 6. Start Cloudflare Tunnel
+      # ============================================================
+      - name: Start Cloudflare Tunnel
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
-          echo "Starting ngrok..."
+          set -e
 
-          nohup ngrok tcp 3128 \
-            --log=stdout \
-            > ngrok.log 2>&1 &
+          echo "Starting Cloudflare Tunnel..."
 
-          NGROK_PID=$!
-          echo "$NGROK_PID" > ngrok.pid
+          nohup cloudflared tunnel run \
+            --token "$CLOUDFLARE_TUNNEL_TOKEN" \
+            > cloudflared.log 2>&1 &
 
-          echo "ngrok PID: $NGROK_PID"
+          CLOUDFLARED_PID=$!
+
+          echo "$CLOUDFLARED_PID" > cloudflared.pid
+
+          echo "cloudflared PID: $CLOUDFLARED_PID"
+
+          sleep 10
 
           echo ""
-          echo "Waiting for ngrok tunnel..."
+          echo "Cloudflare log:"
+          cat cloudflared.log || true
 
-          rm -f /tmp/ngrok.json
-
-          for i in {1..30}; do
-
-            RESPONSE=$(curl -fsS \
-              --max-time 5 \
-              http://127.0.0.1:4040/api/tunnels \
-              2>/dev/null || true)
-
-            if [ -n "$RESPONSE" ]; then
-
-              echo "$RESPONSE" > /tmp/ngrok.json
-
-              if echo "$RESPONSE" | grep -q '"public_url"'; then
-                echo ""
-                echo "ngrok tunnel is ready!"
-                break
-              fi
-
-            fi
-
-            if grep -q "ERR_NGROK_4018" ngrok.log 2>/dev/null; then
-              echo ""
-              echo "=============================================="
-              echo "ERROR: ngrok authentication failed."
-              echo "=============================================="
-              echo ""
-
-              cat ngrok.log
-
-              exit 1
-            fi
-
-            echo "Waiting... ($i/30)"
-            sleep 2
-          done
-
-          if [ ! -s /tmp/ngrok.json ]; then
-
+          if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
             echo ""
-            echo "=============================================="
-            echo "ERROR: ngrok tunnel did not start."
-            echo "=============================================="
-            echo ""
-
-            cat ngrok.log
-
+            echo "ERROR: cloudflared stopped."
             exit 1
           fi
 
-      # ==========================================
-      # Get public Proxy address
-      # ==========================================
-      - name: Get proxy address
-        run: |
-          python3 <<'PY'
-          import json
-          import sys
-
-          try:
-              with open("/tmp/ngrok.json", "r") as f:
-                  data = json.load(f)
-          except Exception as e:
-              print("ERROR: Cannot read ngrok API response.")
-              print(e)
-              sys.exit(1)
-
-          tunnels = data.get("tunnels", [])
-
-          if not tunnels:
-              print("ERROR: No tunnels found.")
-              print(json.dumps(data, indent=2))
-              sys.exit(1)
-
-          found = False
-
-          for tunnel in tunnels:
-
-              public_url = tunnel.get("public_url", "")
-
-              if public_url.startswith("tcp://"):
-
-                  address = public_url[len("tcp://"):]
-
-                  try:
-                      host, port = address.rsplit(":", 1)
-                  except ValueError:
-                      continue
-
-                  print("")
-                  print("==============================================")
-                  print("           WINDOWS PROXY INFORMATION")
-                  print("==============================================")
-                  print("")
-
-                  print("Proxy address:")
-                  print(host)
-
-                  print("")
-                  print("Proxy port:")
-                  print(port)
-
-                  print("")
-                  print("----------------------------------------------")
-                  print("Windows 11:")
-                  print("----------------------------------------------")
-                  print("")
-                  print("Settings")
-                  print("  -> Network & Internet")
-                  print("  -> Proxy")
-                  print("  -> Manual proxy setup")
-                  print("  -> Use a proxy server: ON")
-                  print("")
-                  print("Address:", host)
-                  print("Port:", port)
-                  print("")
-
-                  print("==============================================")
-
-                  found = True
-                  break
-
-          if not found:
-
-              print("ERROR: TCP tunnel was not found.")
-
-              print("")
-              print("Available tunnels:")
-
-              for tunnel in tunnels:
-                  print(
-                      tunnel.get("proto", ""),
-                      tunnel.get("public_url", "")
-                  )
-
-              sys.exit(1)
-
-          PY
-
-      # ==========================================
-      # Keep Proxy alive
-      # ==========================================
-      - name: Keep proxy alive
-        run: |
           echo ""
           echo "=============================================="
-          echo "Proxy is running."
+          echo "Cloudflare Tunnel is running."
           echo "=============================================="
+
+      # ============================================================
+      # 7. Display Windows instructions
+      # ============================================================
+      - name: Show Windows configuration
+        run: |
           echo ""
-          echo "Do NOT stop this workflow while using the proxy."
+          echo "======================================================"
+          echo "             PROXY IS READY"
+          echo "======================================================"
+          echo ""
+          echo "Cloudflare Tunnel is connected to:"
+          echo ""
+          echo "    127.0.0.1:3128"
+          echo ""
+          echo "    Windows must run:"
+          echo ""
+          echo "    cloudflared access tcp --hostname YOUR_HOSTNAME --url 127.0.0.1:3128"
+          echo ""
+          echo "Then configure Windows proxy:"
+          echo ""
+          echo "    Address: 127.0.0.1"
+          echo "    Port:    3128"
+          echo ""
+          echo "======================================================"
+
+      # ============================================================
+      # 8. Keep runner alive
+      # ============================================================
+      - name: Keep Proxy Alive
+        run: |
+          echo ""
+          echo "======================================================"
+          echo "GitHub Actions Proxy VPS is running"
+          echo "======================================================"
           echo ""
 
           while true; do
@@ -280,24 +204,23 @@ jobs:
               sudo systemctl restart squid
             fi
 
-            # Check ngrok
-            if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
-              echo "ngrok stopped."
-
-              echo ""
-              echo "ngrok log:"
-              cat ngrok.log || true
-
+            # Check cloudflared
+            if [ ! -f cloudflared.pid ]; then
+              echo "cloudflared PID file missing."
               exit 1
             fi
 
-            # Check tunnel API
-            if ! curl -fsS \
-              --max-time 5 \
-              http://127.0.0.1:4040/api/tunnels \
-              > /dev/null 2>&1; then
+            CLOUDFLARED_PID=$(cat cloudflared.pid)
 
-              echo "WARNING: ngrok API is unavailable."
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo ""
+              echo "cloudflared stopped."
+              echo ""
+              echo "Cloudflare log:"
+              cat cloudflared.log || true
+              exit 1
             fi
+
+            echo "[$(date)] Proxy alive"
 
           done
