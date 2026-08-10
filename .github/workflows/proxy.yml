@@ -1,0 +1,130 @@
+name: Internet Proxy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  proxy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Install Squid
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y squid curl
+
+      - name: Configure Squid
+        run: |
+          sudo tee /etc/squid/squid.conf > /dev/null <<'EOF'
+          http_port 3128
+
+          acl all src all
+          http_access allow all
+
+          cache deny all
+
+          access_log none
+          cache_log /var/log/squid/cache.log
+
+          forwarded_for delete
+          via off
+          request_header_access X-Forwarded-For deny all
+          request_header_access Via deny all
+          request_header_access Cache-Control deny all
+          EOF
+
+          sudo systemctl restart squid
+          sudo systemctl status squid --no-pager
+
+      - name: Test local proxy
+        run: |
+          curl -I \
+            -x http://127.0.0.1:3128 \
+            https://example.com
+
+      - name: Install ngrok
+        run: |
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+
+          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list
+
+          sudo apt-get update
+          sudo apt-get install -y ngrok
+
+      - name: Configure ngrok
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+
+      - name: Start TCP tunnel
+        run: |
+          nohup ngrok tcp 3128 --log=stdout > ngrok.log 2>&1 &
+          sleep 5
+
+          cat ngrok.log
+
+      - name: Get proxy address
+        run: |
+          for i in {1..30}; do
+            RESPONSE=$(curl -s http://127.0.0.1:4040/api/tunnels || true)
+
+            if echo "$RESPONSE" | grep -q "tcp://"; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          echo ""
+          echo "=============================================="
+          echo "           WINDOWS PROXY INFORMATION"
+          echo "=============================================="
+          echo ""
+
+          curl -s http://127.0.0.1:4040/api/tunnels \
+            | python3 -c '
+          import sys, json
+
+          data=json.load(sys.stdin)
+
+          for tunnel in data.get("tunnels", []):
+              public=tunnel.get("public_url","")
+
+              if public.startswith("tcp://"):
+                  address=public.replace("tcp://","")
+                  host,port=address.rsplit(":",1)
+
+                  print("Proxy address:")
+                  print(host)
+                  print("")
+                  print("Proxy port:")
+                  print(port)
+                  print("")
+                  print("Windows:")
+                  print("Settings -> Network & Internet -> Proxy")
+                  print("Manual proxy -> ON")
+                  print("Address:",host)
+                  print("Port:",port)
+          '
+
+          echo ""
+          echo "=============================================="
+
+      - name: Keep proxy alive
+        run: |
+          echo "Proxy is running..."
+          echo "GitHub Actions runner will keep the proxy alive."
+          echo ""
+
+          while true; do
+            sleep 60
+
+            if ! systemctl is-active --quiet squid; then
+              echo "Squid stopped - restarting..."
+              sudo systemctl restart squid
+            fi
+          done
