@@ -1,4 +1,4 @@
-name: GitHub Actions Proxy
+name: GitHub Actions Pinggy Proxy
 
 on:
   workflow_dispatch:
@@ -23,12 +23,7 @@ jobs:
           sudo apt-get install -y \
             squid \
             curl \
-            python3 \
-            python3-pip
-
-          python3 -m pip install \
-            --break-system-packages \
-            websockify
+            openssh-client
 
       # ==========================================================
       # Configure Squid
@@ -68,7 +63,12 @@ jobs:
 
           if ! sudo systemctl is-active --quiet squid; then
             echo "Squid failed to start."
-            sudo journalctl -u squid --no-pager -n 100
+
+            sudo journalctl \
+              -u squid \
+              --no-pager \
+              -n 100
+
             exit 1
           fi
 
@@ -93,105 +93,56 @@ jobs:
           echo "Squid test successful."
 
       # ==========================================================
-      # Start WebSocket -> TCP bridge
+      # Start Pinggy TCP Tunnel
       # ==========================================================
-      - name: Start WebSocket bridge
+      - name: Start Pinggy TCP Tunnel
         run: |
           set -e
 
-          rm -f websockify.log
-          rm -f websockify.pid
-
-          echo "Starting websockify..."
-
-          nohup websockify \
-            0.0.0.0:8080 \
-            127.0.0.1:3128 \
-            > websockify.log 2>&1 &
-
-          WEBSOCKIFY_PID=$!
-
-          echo "$WEBSOCKIFY_PID" > websockify.pid
-
-          sleep 3
-
-          if ! kill -0 "$WEBSOCKIFY_PID" 2>/dev/null; then
-            echo ""
-            echo "=========================================="
-            echo "websockify failed"
-            echo "=========================================="
-            echo ""
-
-            cat websockify.log
-
-            exit 1
-          fi
+          rm -f pinggy.log
+          rm -f pinggy.pid
 
           echo ""
-          echo "=========================================="
-          echo "WebSocket bridge is running"
-          echo "=========================================="
-          echo ""
-          echo "Listen: 0.0.0.0:8080"
-          echo "Target: 127.0.0.1:3128"
+          echo "=============================================="
+          echo "Starting Pinggy TCP Tunnel"
+          echo "=============================================="
           echo ""
 
-      # ==========================================================
-      # Install Cloudflared
-      # ==========================================================
-      - name: Install Cloudflared
-        run: |
-          set -e
+          nohup ssh \
+            -p 443 \
+            -T \
+            -N \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=3 \
+            -R 0:127.0.0.1:3128 \
+            tcp@free.pinggy.io \
+            > pinggy.log 2>&1 &
 
-          curl \
-            -L \
-            --fail \
-            --silent \
-            --show-error \
-            -o cloudflared.deb \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          PINGGY_PID=$!
 
-          sudo dpkg -i cloudflared.deb
+          echo "$PINGGY_PID" > pinggy.pid
 
-          cloudflared --version
-
-      # ==========================================================
-      # Start Cloudflare Quick Tunnel
-      # ==========================================================
-      - name: Start Cloudflare Quick Tunnel
-        run: |
-          set -e
-
-          rm -f tunnel.log
-          rm -f tunnel.pid
-
-          echo "Starting Cloudflare Quick Tunnel..."
-
-          nohup cloudflared tunnel \
-            --url http://127.0.0.1:8080 \
-            --no-autoupdate \
-            > tunnel.log 2>&1 &
-
-          TUNNEL_PID=$!
-
-          echo "$TUNNEL_PID" > tunnel.pid
+          echo "Pinggy PID: $PINGGY_PID"
 
           echo ""
-          echo "Waiting for Cloudflare URL..."
+          echo "Waiting for Pinggy tunnel..."
+          echo ""
 
-          TUNNEL_URL=""
+          PINGGY_URL=""
 
           for i in {1..60}; do
 
-            TUNNEL_URL=$(
+            PINGGY_URL=$(
               grep -oE \
-                'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
-                tunnel.log \
+                'tcp://[^[:space:]]+' \
+                pinggy.log \
                 | head -n 1 \
                 || true
             )
 
-            if [ -n "$TUNNEL_URL" ]; then
+            if [ -n "$PINGGY_URL" ]; then
               break
             fi
 
@@ -201,42 +152,71 @@ jobs:
 
           done
 
-          if [ -z "$TUNNEL_URL" ]; then
+          echo ""
+          echo "=============================================="
+          echo "PINGGY OUTPUT"
+          echo "=============================================="
+          echo ""
 
+          cat pinggy.log || true
+
+          echo ""
+          echo "=============================================="
+
+          if [ -z "$PINGGY_URL" ]; then
             echo ""
-            echo "=========================================="
-            echo "Cloudflare Quick Tunnel failed"
-            echo "=========================================="
+            echo "ERROR: Pinggy TCP address was not detected."
             echo ""
 
-            cat tunnel.log
+            if ! kill -0 "$PINGGY_PID" 2>/dev/null; then
+              echo "Pinggy process stopped."
+            fi
 
             exit 1
           fi
 
-          WS_URL="${TUNNEL_URL/https:/wss:}"
+          echo "$PINGGY_URL"
 
-          echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
-          echo "WS_URL=$WS_URL" >> "$GITHUB_ENV"
+          echo ""
+
+          # Extract host and port
+          PINGGY_HOST=$(
+            echo "$PINGGY_URL" \
+              | sed -E 's#tcp://([^:]+):([0-9]+).*#\1#'
+          )
+
+          PINGGY_PORT=$(
+            echo "$PINGGY_URL" \
+              | sed -E 's#tcp://([^:]+):([0-9]+).*#\2#'
+          )
+
+          echo "PINGGY_URL=$PINGGY_URL" >> "$GITHUB_ENV"
+          echo "PINGGY_HOST=$PINGGY_HOST" >> "$GITHUB_ENV"
+          echo "PINGGY_PORT=$PINGGY_PORT" >> "$GITHUB_ENV"
 
           echo ""
           echo "=============================================="
-          echo "       CLOUDFLARE QUICK TUNNEL READY"
+          echo "       PINGGY PROXY READY"
           echo "=============================================="
           echo ""
-          echo "HTTPS:"
-          echo "$TUNNEL_URL"
+          echo "Public TCP address:"
+          echo "$PINGGY_URL"
           echo ""
-          echo "WebSocket:"
-          echo "$WS_URL"
+          echo "Host:"
+          echo "$PINGGY_HOST"
+          echo ""
+          echo "Port:"
+          echo "$PINGGY_PORT"
           echo ""
           echo "=============================================="
 
       # ==========================================================
-      # Verify processes
+      # Verify Pinggy
       # ==========================================================
-      - name: Verify services
+      - name: Verify Pinggy
         run: |
+          set -e
+
           echo ""
           echo "=============================================="
           echo "SERVICE STATUS"
@@ -244,25 +224,24 @@ jobs:
           echo ""
 
           echo "Squid:"
-          sudo systemctl is-active squid || true
 
-          echo ""
-          echo "websockify:"
-          if kill -0 "$(cat websockify.pid)" 2>/dev/null; then
+          if sudo systemctl is-active --quiet squid; then
             echo "RUNNING"
           else
             echo "STOPPED"
-            cat websockify.log || true
             exit 1
           fi
 
           echo ""
-          echo "cloudflared:"
-          if kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
+          echo "Pinggy:"
+
+          if kill -0 "$(cat pinggy.pid)" 2>/dev/null; then
             echo "RUNNING"
           else
             echo "STOPPED"
-            cat tunnel.log || true
+
+            cat pinggy.log || true
+
             exit 1
           fi
 
@@ -270,31 +249,31 @@ jobs:
           echo "=============================================="
 
       # ==========================================================
-      # Print information
+      # Print connection information
       # ==========================================================
       - name: Print connection information
         run: |
           echo ""
           echo "================================================"
-          echo "              PROXY VPS INFORMATION"
+          echo "             PINGGY PROXY INFORMATION"
           echo "================================================"
           echo ""
-          echo "Squid:"
+          echo "Public TCP:"
+          echo "$PINGGY_URL"
+          echo ""
+          echo "Host:"
+          echo "$PINGGY_HOST"
+          echo ""
+          echo "Port:"
+          echo "$PINGGY_PORT"
+          echo ""
+          echo "Local Squid:"
           echo "127.0.0.1:3128"
           echo ""
-          echo "WebSocket bridge:"
-          echo "127.0.0.1:8080"
-          echo ""
-          echo "Cloudflare Quick Tunnel:"
-          echo "$TUNNEL_URL"
-          echo ""
-          echo "WebSocket endpoint:"
-          echo "$WS_URL"
-          echo ""
           echo "================================================"
           echo ""
-          echo "No Cloudflare token was required."
-          echo "No Cloudflare Dashboard configuration was required."
+          echo "Configure your local Python bridge to connect"
+          echo "to the Pinggy host and port above."
           echo ""
           echo "================================================"
 
@@ -311,30 +290,46 @@ jobs:
 
             sleep 60
 
+            # ----------------------------------------------------
             # Check Squid
+            # ----------------------------------------------------
             if ! sudo systemctl is-active --quiet squid; then
-              echo "Squid stopped."
+
+              echo ""
+              echo "Squid stopped. Restarting..."
+
               sudo systemctl restart squid
+
+              sleep 2
+
+              if ! sudo systemctl is-active --quiet squid; then
+
+                echo ""
+                echo "Squid failed to restart."
+
+                sudo journalctl \
+                  -u squid \
+                  --no-pager \
+                  -n 100
+
+                exit 1
+              fi
             fi
 
-            # Check websockify
-            if ! kill -0 "$(cat websockify.pid)" 2>/dev/null; then
+            # ----------------------------------------------------
+            # Check Pinggy
+            # ----------------------------------------------------
+            if ! kill -0 "$(cat pinggy.pid)" 2>/dev/null; then
+
               echo ""
-              echo "websockify stopped."
+              echo "Pinggy stopped."
               echo ""
-              cat websockify.log || true
+
+              cat pinggy.log || true
+
               exit 1
             fi
 
-            # Check Cloudflare
-            if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
-              echo ""
-              echo "Cloudflare tunnel stopped."
-              echo ""
-              cat tunnel.log || true
-              exit 1
-            fi
-
-            echo "[$(date)] All services are running."
+            echo "[$(date)] Squid + Pinggy are running."
 
           done
