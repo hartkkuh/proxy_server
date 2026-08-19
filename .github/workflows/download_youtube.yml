@@ -13,50 +13,131 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ==========================================
+      # Checkout repository
+      # ==========================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg jq
 
-          curl -fsSL https://deno.land/install.sh | sh
+      # ==========================================
+      # Install dependencies
+      # ==========================================
+
+      - name: Install dependencies
+        timeout-minutes: 5
+        run: |
+          set -euxo pipefail
+
+          echo "Checking installed tools..."
+
+          echo "Python:"
+          python --version
+
+          echo "FFmpeg:"
+          ffmpeg -version | head -n 1 || true
+
+          echo "jq:"
+          jq --version || true
+
+          echo "Installing Deno..."
+
+          curl -fsSL \
+            --retry 3 \
+            --retry-delay 2 \
+            https://deno.land/install.sh | sh
+
           echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
 
-          python -m pip install -U \
+          echo "Installing Python packages..."
+
+          python -m pip install --upgrade pip
+
+          python -m pip install --upgrade \
             "yt-dlp[default]" \
             google-api-python-client \
             google-auth \
             google-auth-oauthlib
 
+          echo "Installation completed."
+
+
+      # ==========================================
+      # Verify dependencies
+      # ==========================================
+
+      - name: Verify dependencies
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Dependency check"
+          echo "======================================"
+
+          python --version
+          yt-dlp --version
+          ffmpeg -version | head -n 1
+          jq --version
+          deno --version
+
+          echo "======================================"
+          echo "All dependencies OK"
+          echo "======================================"
+
+
+      # ==========================================
+      # Create Google Drive token
+      # ==========================================
+
       - name: Create Google Drive token
         env:
           GOOGLE_DRIVE_TOKEN: ${{ secrets.GOOGLE_DRIVE_TOKEN }}
+
         run: |
+          set -e
+
           if [ -z "$GOOGLE_DRIVE_TOKEN" ]; then
-            echo "ERROR: GOOGLE_DRIVE_TOKEN secret is not configured."
+            echo "ERROR:"
+            echo "GOOGLE_DRIVE_TOKEN secret is not configured."
             exit 1
           fi
 
+          echo "Creating token.json..."
+
           umask 077
+
           printf '%s' "$GOOGLE_DRIVE_TOKEN" > token.json
+
+          echo "token.json created."
+
+
+      # ==========================================
+      # Download and upload
+      # ==========================================
 
       - name: Download and upload videos
         env:
           URLS: ${{ inputs.urls }}
+
         run: |
-          set -e
+          set -euo pipefail
 
           echo "======================================"
           echo "Starting YouTube download job"
           echo "======================================"
 
           COUNT=0
+          SUCCESS=0
+          FAILED=0
 
           while IFS= read -r URL; do
 
-            # Skip empty lines
+            # --------------------------------------
+            # Ignore empty lines
+            # --------------------------------------
+
             if [ -z "$URL" ]; then
               continue
             fi
@@ -64,79 +145,178 @@ jobs:
             COUNT=$((COUNT + 1))
 
             echo ""
+            echo ""
             echo "======================================"
             echo "Processing URL #$COUNT"
+            echo "======================================"
             echo "$URL"
             echo "======================================"
 
+
+            # --------------------------------------
+            # Download
+            # --------------------------------------
+
+            echo ""
             echo "Downloading..."
 
-            FILE=$(yt-dlp \
+            set +e
+
+            FILE=$(timeout 30m yt-dlp \
               --cookies cookies.txt \
               --remote-components ejs:github \
+              --socket-timeout 30 \
+              --retries 10 \
+              --fragment-retries 10 \
+              --retry-sleep 5 \
               -f "best[height<=720]/best" \
               --merge-output-format mp4 \
               -o "%(title)s.%(ext)s" \
               --print after_move:filepath \
-              "$URL")
+              "$URL" 2>&1)
 
-            if [ -z "$FILE" ]; then
-              echo "ERROR: yt-dlp did not return a file."
-              exit 1
+            EXIT_CODE=$?
+
+            set -e
+
+            echo "$FILE"
+
+            if [ "$EXIT_CODE" -ne 0 ]; then
+
+              echo ""
+              echo "======================================"
+              echo "DOWNLOAD FAILED"
+              echo "======================================"
+              echo "URL:"
+              echo "$URL"
+              echo "Exit code: $EXIT_CODE"
+              echo "======================================"
+
+              FAILED=$((FAILED + 1))
+
+              continue
+            fi
+
+
+            # --------------------------------------
+            # Find downloaded file
+            # --------------------------------------
+
+            FILE_PATH=$(echo "$FILE" | tail -n 1)
+
+            if [ ! -f "$FILE_PATH" ]; then
+
+              echo ""
+              echo "ERROR:"
+              echo "Downloaded file was not found."
+
+              FAILED=$((FAILED + 1))
+
+              continue
             fi
 
             echo ""
-            echo "Downloaded:"
-            echo "$FILE"
+            echo "Downloaded file:"
+            echo "$FILE_PATH"
 
-            if [ ! -f "$FILE" ]; then
-              echo "ERROR: File does not exist:"
-              echo "$FILE"
-              exit 1
-            fi
 
-            export FILE
+            # --------------------------------------
+            # File information
+            # --------------------------------------
+
+            FILE_NAME=$(basename "$FILE_PATH")
+
+            FILE_SIZE=$(du -h "$FILE_PATH" | cut -f1)
+
+            echo ""
+            echo "File name:"
+            echo "$FILE_NAME"
+
+            echo "File size:"
+            echo "$FILE_SIZE"
+
+
+            # --------------------------------------
+            # Upload to Google Drive
+            # --------------------------------------
 
             echo ""
             echo "Uploading to Google Drive..."
 
+            export FILE_PATH
+
             python3 <<'PY'
           import json
           import os
+          import sys
 
           from google.auth.transport.requests import Request
           from google.oauth2.credentials import Credentials
           from google.oauth2 import service_account
+
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
-          file_path = os.environ["FILE"]
+
+          # ==========================================
+          # Get file
+          # ==========================================
+
+          file_path = os.environ["FILE_PATH"]
+
           file_name = os.path.basename(file_path)
+
+          print("======================================")
+          print("Google Drive upload")
+          print("======================================")
 
           print(f"File: {file_name}")
           print(f"Path: {file_path}")
 
-          with open("token.json", encoding="utf-8") as f:
+
+          # ==========================================
+          # Read token
+          # ==========================================
+
+          with open(
+              "token.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
               token_info = json.load(f)
+
+
+          # ==========================================
+          # Google Drive permissions
+          # ==========================================
 
           scopes = [
               "https://www.googleapis.com/auth/drive"
           ]
 
+
+          # ==========================================
           # Service Account
+          # ==========================================
+
           if token_info.get("type") == "service_account":
 
-              print("Using Google Service Account")
+              print("Authentication type: Service Account")
 
               creds = service_account.Credentials.from_service_account_info(
                   token_info,
                   scopes=scopes
               )
 
-          # OAuth token
+
+          # ==========================================
+          # OAuth
+          # ==========================================
+
           else:
 
-              print("Using Google OAuth token")
+              print("Authentication type: OAuth")
 
               creds = Credentials.from_authorized_user_info(
                   token_info,
@@ -144,8 +324,15 @@ jobs:
               )
 
               if creds.expired and creds.refresh_token:
+
                   print("Refreshing OAuth token...")
+
                   creds.refresh(Request())
+
+
+          # ==========================================
+          # Google Drive API
+          # ==========================================
 
           service = build(
               "drive",
@@ -153,11 +340,17 @@ jobs:
               credentials=creds
           )
 
+
+          # ==========================================
+          # Upload
+          # ==========================================
+
           media = MediaFileUpload(
               file_path,
               mimetype="video/mp4",
               resumable=True
           )
+
 
           uploaded = (
               service.files()
@@ -171,32 +364,90 @@ jobs:
               .execute()
           )
 
+
+          # ==========================================
+          # Result
+          # ==========================================
+
           print("")
+          print("======================================")
           print("UPLOAD SUCCESS")
-          print(json.dumps(
-              uploaded,
-              ensure_ascii=False,
-              indent=2
-          ))
+          print("======================================")
+
+          print(
+              json.dumps(
+                  uploaded,
+                  ensure_ascii=False,
+                  indent=2
+              )
+          )
+
+          print("======================================")
+
           PY
 
-            echo ""
-            echo "Upload completed."
 
-            # Delete local file to save runner disk space
-            rm -f "$FILE"
+            # --------------------------------------
+            # Delete local file
+            # --------------------------------------
+
+            echo ""
+            echo "Deleting local file..."
+
+            rm -f "$FILE_PATH"
 
             echo "Local file deleted."
 
+
+            # --------------------------------------
+            # Success
+            # --------------------------------------
+
+            SUCCESS=$((SUCCESS + 1))
+
+            echo ""
+            echo "======================================"
+            echo "VIDEO COMPLETED"
+            echo "======================================"
+
           done <<< "$URLS"
 
+
+          # ==========================================
+          # Summary
+          # ==========================================
+
+          echo ""
           echo ""
           echo "======================================"
-          echo "Finished"
-          echo "Processed $COUNT URL(s)"
+          echo "FINAL SUMMARY"
           echo "======================================"
 
-      - name: Cleanup token
+          echo "Total URLs: $COUNT"
+          echo "Successful: $SUCCESS"
+          echo "Failed: $FAILED"
+
+          echo "======================================"
+
+
+          # Fail workflow if every URL failed
+
+          if [ "$COUNT" -gt 0 ] && [ "$SUCCESS" -eq 0 ]; then
+            echo ""
+            echo "All downloads failed."
+            exit 1
+          fi
+
+
+      # ==========================================
+      # Cleanup secrets
+      # ==========================================
+
+      - name: Cleanup
         if: always()
         run: |
+          echo "Cleaning temporary credentials..."
+
           rm -f token.json
+
+          echo "Cleanup completed."
