@@ -19,4 +19,3 @@ jobs:
             -d "$(echo "$PAYLOAD" | jq '{videos: (.videos // .url), token: .token}')" \
             --fail-with-body \
             --show-error
-

@@ -1,43 +1,106 @@
-name: Download youtube
+name: Download YouTube
 
 on:
-  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "YouTube URLs - one URL per line"
+        required: true
+        type: string
 
 jobs:
   download:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg jq
+
           curl -fsSL https://deno.land/install.sh | sh
-          echo "$HOME/.deno/bin" >> $GITHUB_PATH
-          python -m pip install -U "yt-dlp[default]" \
-            google-api-python-client google-auth google-auth-oauthlib
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
 
-      - name: Download and upload to Google Drive
+          python -m pip install -U \
+            "yt-dlp[default]" \
+            google-api-python-client \
+            google-auth \
+            google-auth-oauthlib
+
+      - name: Create Google Drive token
         env:
-          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+          GOOGLE_DRIVE_TOKEN: ${{ secrets.GOOGLE_DRIVE_TOKEN }}
         run: |
-          URL=$(echo "$PAYLOAD" | jq -r '.url')
-          echo "Downloading URL: ${URL}"
+          if [ -z "$GOOGLE_DRIVE_TOKEN" ]; then
+            echo "ERROR: GOOGLE_DRIVE_TOKEN secret is not configured."
+            exit 1
+          fi
 
-          echo "$PAYLOAD" | jq 'if .token | type == "string" then .token | fromjson else .token end' > token.json
+          umask 077
+          printf '%s' "$GOOGLE_DRIVE_TOKEN" > token.json
 
-          FILE=$(yt-dlp --cookies cookies.txt \
-            --remote-components ejs:github \
-            -f "best[height<=720]/best"            --merge-output-format mp4 \
-            -o "%(title)s.%(ext)s" \
-            --print after_move:filepath \
-            "${URL}")
+      - name: Download and upload videos
+        env:
+          URLS: ${{ inputs.urls }}
+        run: |
+          set -e
 
-          echo "Uploading to Google Drive: ${FILE}"
+          echo "======================================"
+          echo "Starting YouTube download job"
+          echo "======================================"
 
-          export FILE
-          python3 <<'EOF'
+          COUNT=0
+
+          while IFS= read -r URL; do
+
+            # Skip empty lines
+            if [ -z "$URL" ]; then
+              continue
+            fi
+
+            COUNT=$((COUNT + 1))
+
+            echo ""
+            echo "======================================"
+            echo "Processing URL #$COUNT"
+            echo "$URL"
+            echo "======================================"
+
+            echo "Downloading..."
+
+            FILE=$(yt-dlp \
+              --cookies cookies.txt \
+              --remote-components ejs:github \
+              -f "best[height<=720]/best" \
+              --merge-output-format mp4 \
+              -o "%(title)s.%(ext)s" \
+              --print after_move:filepath \
+              "$URL")
+
+            if [ -z "$FILE" ]; then
+              echo "ERROR: yt-dlp did not return a file."
+              exit 1
+            fi
+
+            echo ""
+            echo "Downloaded:"
+            echo "$FILE"
+
+            if [ ! -f "$FILE" ]; then
+              echo "ERROR: File does not exist:"
+              echo "$FILE"
+              exit 1
+            fi
+
+            export FILE
+
+            echo ""
+            echo "Uploading to Google Drive..."
+
+            python3 <<'PY'
           import json
           import os
 
@@ -50,27 +113,90 @@ jobs:
           file_path = os.environ["FILE"]
           file_name = os.path.basename(file_path)
 
+          print(f"File: {file_name}")
+          print(f"Path: {file_path}")
+
           with open("token.json", encoding="utf-8") as f:
               token_info = json.load(f)
 
-          scopes = ["https://www.googleapis.com/auth/drive"]
+          scopes = [
+              "https://www.googleapis.com/auth/drive"
+          ]
 
+          # Service Account
           if token_info.get("type") == "service_account":
+
+              print("Using Google Service Account")
+
               creds = service_account.Credentials.from_service_account_info(
-                  token_info, scopes=scopes
+                  token_info,
+                  scopes=scopes
               )
+
+          # OAuth token
           else:
-              creds = Credentials.from_authorized_user_info(token_info, scopes=scopes)
+
+              print("Using Google OAuth token")
+
+              creds = Credentials.from_authorized_user_info(
+                  token_info,
+                  scopes=scopes
+              )
+
               if creds.expired and creds.refresh_token:
+                  print("Refreshing OAuth token...")
                   creds.refresh(Request())
 
-          service = build("drive", "v3", credentials=creds)
-          media = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
+          service = build(
+              "drive",
+              "v3",
+              credentials=creds
+          )
+
+          media = MediaFileUpload(
+              file_path,
+              mimetype="video/mp4",
+              resumable=True
+          )
+
           uploaded = (
               service.files()
-              .create(body={"name": file_name}, media_body=media, fields="id,name,webViewLink")
+              .create(
+                  body={
+                      "name": file_name
+                  },
+                  media_body=media,
+                  fields="id,name,webViewLink"
+              )
               .execute()
           )
 
-          print(json.dumps(uploaded, ensure_ascii=False, indent=2))
-          EOF
+          print("")
+          print("UPLOAD SUCCESS")
+          print(json.dumps(
+              uploaded,
+              ensure_ascii=False,
+              indent=2
+          ))
+          PY
+
+            echo ""
+            echo "Upload completed."
+
+            # Delete local file to save runner disk space
+            rm -f "$FILE"
+
+            echo "Local file deleted."
+
+          done <<< "$URLS"
+
+          echo ""
+          echo "======================================"
+          echo "Finished"
+          echo "Processed $COUNT URL(s)"
+          echo "======================================"
+
+      - name: Cleanup token
+        if: always()
+        run: |
+          rm -f token.json
