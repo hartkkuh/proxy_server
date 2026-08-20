@@ -23,7 +23,7 @@ jobs:
 
 
       # ==========================================
-      # Install Python dependencies
+      # Install dependencies
       # ==========================================
 
       - name: Install dependencies
@@ -46,6 +46,21 @@ jobs:
           python -m playwright install --with-deps chromium
 
           echo "Dependencies installed."
+
+
+      # ==========================================
+      # Verify
+      # ==========================================
+
+      - name: Verify dependencies
+        run: |
+          set -e
+
+          python --version
+          python -c "import playwright; print('Playwright OK')"
+
+          chromium_version=$(chromium --version 2>/dev/null || true)
+          echo "Chromium: $chromium_version"
 
 
       # ==========================================
@@ -85,13 +100,31 @@ jobs:
           python3 <<'PY'
 
           import asyncio
-          import re
+          import os
           from urllib.parse import urlparse, parse_qs
 
 
-          INPUT_URL = """$INPUT_URL"""
+          # ==========================================
+          # Get URL from environment
+          # ==========================================
+
+          INPUT_URL = os.environ["INPUT_URL"].strip()
 
           OUTPUT_FILE = "youtube_links.txt"
+
+
+          if not INPUT_URL:
+              raise RuntimeError(
+                  "INPUT_URL is empty."
+              )
+
+
+          print("======================================")
+          print("YouTube link extractor")
+          print("======================================")
+
+          print("Opening:")
+          print(INPUT_URL)
 
 
           # ==========================================
@@ -105,9 +138,12 @@ jobs:
               if not url:
                   return None
 
-              # Remove escaped characters
+
+              # Remove escaped URL characters
+
               url = url.replace("\\u0026", "&")
               url = url.replace("\\/", "/")
+
 
               parsed = urlparse(url)
 
@@ -120,17 +156,26 @@ jobs:
                   host = host[2:]
 
 
-              # --------------------------------------
-              # youtube.com/watch?v=
-              # --------------------------------------
+              # ======================================
+              # youtube.com
+              # ======================================
 
               if host == "youtube.com":
 
+                  # ----------------------------------
+                  # /watch?v=
+                  # ----------------------------------
+
                   if parsed.path == "/watch":
 
-                      query = parse_qs(parsed.query)
+                      query = parse_qs(
+                          parsed.query
+                      )
 
-                      video_id = query.get("v", [None])[0]
+                      video_id = query.get(
+                          "v",
+                          [None]
+                      )[0]
 
                       if video_id:
 
@@ -141,7 +186,7 @@ jobs:
 
 
                   # ----------------------------------
-                  # YouTube Shorts
+                  # /shorts/
                   # ----------------------------------
 
                   if parsed.path.startswith("/shorts/"):
@@ -162,7 +207,7 @@ jobs:
 
 
                   # ----------------------------------
-                  # YouTube embed
+                  # /embed/
                   # ----------------------------------
 
                   if parsed.path.startswith("/embed/"):
@@ -181,9 +226,9 @@ jobs:
                           )
 
 
-              # --------------------------------------
+              # ======================================
               # youtu.be
-              # --------------------------------------
+              # ======================================
 
               if host == "youtu.be":
 
@@ -205,20 +250,13 @@ jobs:
 
 
           # ==========================================
-          # Main browser function
+          # Browser
           # ==========================================
 
           async def main():
 
               from playwright.async_api import async_playwright
 
-
-              print("======================================")
-              print("YouTube link extractor")
-              print("======================================")
-
-              print("Opening:")
-              print(INPUT_URL)
 
               links = set()
 
@@ -228,9 +266,9 @@ jobs:
                   browser = await p.chromium.launch(
                       headless=True,
                       args=[
-                          "--disable-blink-features=AutomationControlled",
                           "--no-sandbox",
-                          "--disable-dev-shm-usage"
+                          "--disable-dev-shm-usage",
+                          "--disable-blink-features=AutomationControlled"
                       ]
                   )
 
@@ -245,80 +283,199 @@ jobs:
                           "AppleWebKit/537.36 "
                           "(KHTML, like Gecko) "
                           "Chrome/131.0.0.0 Safari/537.36"
-                      )
+                      ),
+                      locale="en-US"
                   )
 
 
                   page = await context.new_page()
 
 
-                  # ----------------------------------
-                  # Open page
-                  # ----------------------------------
+                  # ==================================
+                  # Open YouTube
+                  # ==================================
 
-                  await page.goto(
+                  print("")
+                  print("Loading page...")
+
+
+                  response = await page.goto(
                       INPUT_URL,
                       wait_until="domcontentloaded",
                       timeout=120000
                   )
 
 
-                  print("Page loaded.")
+                  print(
+                      "HTTP status:",
+                      response.status if response else "unknown"
+                  )
+
 
                   await page.wait_for_timeout(5000)
 
 
-                  # ----------------------------------
-                  # Collect links function
-                  # ----------------------------------
+                  print("Page loaded.")
+                  print(
+                      "Current URL:",
+                      page.url
+                  )
+
+
+                  # ==================================
+                  # Accept cookies if displayed
+                  # ==================================
+
+                  try:
+
+                      buttons = [
+                          "Accept all",
+                          "I agree",
+                          "Reject all",
+                          "Got it"
+                      ]
+
+                      for button_text in buttons:
+
+                          locator = page.get_by_role(
+                              "button",
+                              name=button_text
+                          )
+
+                          if await locator.count() > 0:
+
+                              try:
+                                  await locator.first.click(
+                                      timeout=2000
+                                  )
+
+                                  print(
+                                      "Clicked:",
+                                      button_text
+                                  )
+
+                                  await page.wait_for_timeout(
+                                      1500
+                                  )
+
+                                  break
+
+                              except Exception:
+                                  pass
+
+                  except Exception:
+                      pass
+
+
+                  # ==================================
+                  # Collect links
+                  # ==================================
 
                   async def collect_links():
 
-                      found = 0
+                      before = len(links)
 
-                      hrefs = await page.locator("a").evaluate_all(
+
+                      # --------------------------------
+                      # Normal <a href> links
+                      # --------------------------------
+
+                      hrefs = await page.locator(
+                          "a[href]"
+                      ).evaluate_all(
                           """
-                          elements => elements
-                              .map(e => e.href)
-                              .filter(Boolean)
+                          elements =>
+                              elements
+                                  .map(e => e.href)
+                                  .filter(Boolean)
                           """
                       )
 
 
                       for href in hrefs:
 
-                          result = normalize_youtube_url(href)
+                          result = normalize_youtube_url(
+                              href
+                          )
 
-                          if result and result not in links:
+                          if result:
 
                               links.add(result)
 
-                              found += 1
+
+                      # --------------------------------
+                      # Also inspect page HTML
+                      # --------------------------------
+
+                      html = await page.content()
 
 
-                      return found
+                      # Watch URLs
+
+                      watch_matches = set(
+                          __import__("re").findall(
+                              r'https?://(?:www\\.)?youtube\\.com/watch\\?v=[A-Za-z0-9_-]{11}',
+                              html
+                          )
+                      )
 
 
-                  # ----------------------------------
-                  # Initial collection
-                  # ----------------------------------
+                      for url in watch_matches:
+
+                          result = normalize_youtube_url(
+                              url
+                          )
+
+                          if result:
+                              links.add(result)
+
+
+                      # Shorts URLs
+
+                      shorts_matches = set(
+                          __import__("re").findall(
+                              r'https?://(?:www\\.)?youtube\\.com/shorts/[A-Za-z0-9_-]{11}',
+                              html
+                          )
+                      )
+
+
+                      for url in shorts_matches:
+
+                          result = normalize_youtube_url(
+                              url
+                          )
+
+                          if result:
+                              links.add(result)
+
+
+                      return len(links) - before
+
+
+                  # ==================================
+                  # Initial scan
+                  # ==================================
 
                   new_links = await collect_links()
 
+
+                  print("")
                   print(
-                      f"Initial links found: {new_links}"
+                      "Initial links:",
+                      len(links)
                   )
 
 
-                  # ----------------------------------
-                  # Scroll loop
-                  # ----------------------------------
+                  # ==================================
+                  # Infinite scroll
+                  # ==================================
 
                   previous_count = len(links)
 
                   stable_rounds = 0
 
-                  MAX_ROUNDS = 100
+                  MAX_ROUNDS = 150
 
                   for round_number in range(
                       1,
@@ -327,11 +484,30 @@ jobs:
 
                       print("")
                       print(
+                          "======================================"
+                      )
+
+                      print(
                           f"Scroll round #{round_number}"
                       )
 
 
-                      # Scroll near bottom
+                      # --------------------------------
+                      # Get current scroll height
+                      # --------------------------------
+
+                      old_height = await page.evaluate(
+                          """
+                          () =>
+                              document.documentElement
+                                  .scrollHeight
+                          """
+                      )
+
+
+                      # --------------------------------
+                      # Scroll down
+                      # --------------------------------
 
                       await page.evaluate(
                           """
@@ -345,38 +521,69 @@ jobs:
                       )
 
 
-                      # Give YouTube time to load
+                      # --------------------------------
+                      # Wait for YouTube
+                      # --------------------------------
 
-                      await page.wait_for_timeout(2500)
+                      await page.wait_for_timeout(
+                          3000
+                      )
 
 
-                      # Collect newly loaded links
+                      # --------------------------------
+                      # Collect
+                      # --------------------------------
 
                       new_links = await collect_links()
+
 
                       current_count = len(links)
 
 
                       print(
-                          f"New links: {new_links}"
+                          "New links:",
+                          new_links
                       )
 
                       print(
-                          f"Total links: {current_count}"
+                          "Total links:",
+                          current_count
                       )
 
 
-                      # ----------------------------------
-                      # Detect no more content
-                      # ----------------------------------
+                      # --------------------------------
+                      # New page height
+                      # --------------------------------
 
-                      if current_count == previous_count:
+                      new_height = await page.evaluate(
+                          """
+                          () =>
+                              document.documentElement
+                                  .scrollHeight
+                          """
+                      )
+
+
+                      print(
+                          "Scroll height:",
+                          new_height
+                      )
+
+
+                      # --------------------------------
+                      # Detect stable state
+                      # --------------------------------
+
+                      if (
+                          current_count == previous_count
+                          and new_height == old_height
+                      ):
 
                           stable_rounds += 1
 
                           print(
-                              f"No new links "
-                              f"({stable_rounds}/5)"
+                              f"No new content "
+                              f"({stable_rounds}/7)"
                           )
 
                       else:
@@ -387,21 +594,27 @@ jobs:
                       previous_count = current_count
 
 
-                      # Stop after 5 consecutive
-                      # rounds without new links
+                      # --------------------------------
+                      # Stop
+                      # --------------------------------
 
-                      if stable_rounds >= 5:
+                      if stable_rounds >= 7:
 
+                          print("")
                           print(
-                              "No more new links detected."
+                              "No new content detected."
                           )
 
                           break
 
 
-                  # ----------------------------------
-                  # Final collection
-                  # ----------------------------------
+                  # ==================================
+                  # Final scan
+                  # ==================================
+
+                  print("")
+                  print("Final scan...")
+
 
                   await page.evaluate(
                       """
@@ -412,10 +625,18 @@ jobs:
                       """
                   )
 
-                  await page.wait_for_timeout(3000)
+
+                  await page.wait_for_timeout(
+                      3000
+                  )
+
 
                   await collect_links()
 
+
+                  # ==================================
+                  # Close browser
+                  # ==================================
 
                   await browser.close()
 
@@ -424,9 +645,9 @@ jobs:
               # Write file
               # ======================================
 
-              # Sort for deterministic output
-
-              sorted_links = sorted(links)
+              sorted_links = sorted(
+                  links
+              )
 
 
               with open(
@@ -438,8 +659,14 @@ jobs:
 
                   for link in sorted_links:
 
-                      f.write(link + "\n")
+                      f.write(
+                          link + "\n"
+                      )
 
+
+              # ======================================
+              # Result
+              # ======================================
 
               print("")
               print("======================================")
@@ -451,7 +678,7 @@ jobs:
               )
 
               print(
-                  f"Output: {OUTPUT_FILE}"
+                  f"Output file: {OUTPUT_FILE}"
               )
 
               print("======================================")
@@ -463,24 +690,25 @@ jobs:
 
 
       # ==========================================
-      # Show result
+      # Show extracted links
       # ==========================================
 
       - name: Show extracted links
         run: |
+          set -e
+
           echo "======================================"
-          echo "Extracted YouTube links"
+          echo "youtube_links.txt"
           echo "======================================"
 
           cat youtube_links.txt
 
           echo ""
-          echo "======================================"
 
           COUNT=$(wc -l < youtube_links.txt)
 
+          echo "======================================"
           echo "Total links: $COUNT"
-
           echo "======================================"
 
 
@@ -495,7 +723,6 @@ jobs:
           python3 <<'PY'
 
           import json
-          import os
 
           from google.auth.transport.requests import Request
           from google.oauth2.credentials import Credentials
@@ -506,6 +733,7 @@ jobs:
 
 
           FILE_PATH = "youtube_links.txt"
+
           FILE_NAME = "youtube_links.txt"
 
 
@@ -528,7 +756,7 @@ jobs:
 
 
           # ==========================================
-          # Authenticate
+          # Authentication
           # ==========================================
 
           if token_info.get("type") == "service_account":
@@ -575,7 +803,7 @@ jobs:
 
 
           # ==========================================
-          # Google Drive API
+          # Google Drive
           # ==========================================
 
           service = build(
@@ -628,14 +856,15 @@ jobs:
 
           print("======================================")
 
+
           PY
 
 
       # ==========================================
-      # Upload TXT as GitHub artifact too
+      # Save as GitHub Artifact
       # ==========================================
 
-      - name: Save TXT as workflow artifact
+      - name: Save TXT as artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-links
