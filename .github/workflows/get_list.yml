@@ -23,11 +23,11 @@ jobs:
 
 
       # ==========================================
-      # Install yt-dlp
+      # Install Python dependencies
       # ==========================================
 
       - name: Install dependencies
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           set -euxo pipefail
 
@@ -35,25 +35,17 @@ jobs:
 
           python -m pip install --upgrade pip
 
-          python -m pip install --upgrade \
-            "yt-dlp[default]" \
+          python -m pip install \
+            playwright \
             google-api-python-client \
             google-auth \
             google-auth-oauthlib
 
-          echo "Installation completed."
+          echo "Installing Chromium..."
 
+          python -m playwright install --with-deps chromium
 
-      # ==========================================
-      # Verify yt-dlp
-      # ==========================================
-
-      - name: Verify dependencies
-        run: |
-          set -e
-
-          yt-dlp --version
-          echo "Dependencies OK"
+          echo "Dependencies installed."
 
 
       # ==========================================
@@ -80,79 +72,59 @@ jobs:
 
 
       # ==========================================
-      # Extract YouTube video URLs
+      # Extract YouTube links
       # ==========================================
 
-      - name: Extract video links
+      - name: Extract YouTube links
         env:
           INPUT_URL: ${{ inputs.url }}
 
         run: |
           set -euo pipefail
 
-          echo "======================================"
-          echo "YouTube URL extractor"
-          echo "======================================"
-
-          echo "Input:"
-          echo "$INPUT_URL"
-
-          echo ""
-          echo "Extracting video links..."
-
-          # --------------------------------------
-          # Extract URLs using yt-dlp
-          # --------------------------------------
-
-          yt-dlp \
-            --flat-playlist \
-            --ignore-errors \
-            --no-warnings \
-            --print "%(webpage_url)s" \
-            "$INPUT_URL" \
-            > extracted_raw.txt
-
-          echo ""
-          echo "Raw extraction completed."
-
-
-          # --------------------------------------
-          # Normalize and filter URLs
-          # --------------------------------------
-
           python3 <<'PY'
-          from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-          input_file = "extracted_raw.txt"
-          output_file = "youtube_links.txt"
-
-          links = []
-          seen = set()
+          import asyncio
+          import re
+          from urllib.parse import urlparse, parse_qs
 
 
-          def normalize_url(url):
+          INPUT_URL = """$INPUT_URL"""
+
+          OUTPUT_FILE = "youtube_links.txt"
+
+
+          # ==========================================
+          # Normalize YouTube URL
+          # ==========================================
+
+          def normalize_youtube_url(url):
+
               url = url.strip()
 
               if not url:
                   return None
 
+              # Remove escaped characters
+              url = url.replace("\\u0026", "&")
+              url = url.replace("\\/", "/")
+
               parsed = urlparse(url)
 
               host = parsed.netloc.lower()
 
-              # Remove www.
               if host.startswith("www."):
                   host = host[4:]
 
+              if host.startswith("m."):
+                  host = host[2:]
+
+
               # --------------------------------------
-              # Standard YouTube watch URL
+              # youtube.com/watch?v=
               # --------------------------------------
 
-              if host in (
-                  "youtube.com",
-                  "m.youtube.com",
-                  "music.youtube.com"
-              ):
+              if host == "youtube.com":
 
                   if parsed.path == "/watch":
 
@@ -161,23 +133,52 @@ jobs:
                       video_id = query.get("v", [None])[0]
 
                       if video_id:
-                          return f"https://www.youtube.com/watch?v={video_id}"
 
-                  # Shorts
+                          return (
+                              "https://www.youtube.com/watch?v="
+                              + video_id
+                          )
+
+
+                  # ----------------------------------
+                  # YouTube Shorts
+                  # ----------------------------------
+
                   if parsed.path.startswith("/shorts/"):
 
-                      video_id = parsed.path.split("/shorts/", 1)[1].split("/", 1)[0]
+                      video_id = (
+                          parsed.path
+                          .split("/shorts/", 1)[1]
+                          .split("/", 1)[0]
+                          .split("?", 1)[0]
+                      )
 
                       if video_id:
-                          return f"https://www.youtube.com/shorts/{video_id}"
 
-                  # Embed
+                          return (
+                              "https://www.youtube.com/shorts/"
+                              + video_id
+                          )
+
+
+                  # ----------------------------------
+                  # YouTube embed
+                  # ----------------------------------
+
                   if parsed.path.startswith("/embed/"):
 
-                      video_id = parsed.path.split("/embed/", 1)[1].split("/", 1)[0]
+                      video_id = (
+                          parsed.path
+                          .split("/embed/", 1)[1]
+                          .split("/", 1)[0]
+                      )
 
                       if video_id:
-                          return f"https://www.youtube.com/watch?v={video_id}"
+
+                          return (
+                              "https://www.youtube.com/watch?v="
+                              + video_id
+                          )
 
 
               # --------------------------------------
@@ -186,71 +187,289 @@ jobs:
 
               if host == "youtu.be":
 
-                  video_id = parsed.path.strip("/").split("/", 1)[0]
+                  video_id = (
+                      parsed.path
+                      .strip("/")
+                      .split("/", 1)[0]
+                  )
 
                   if video_id:
-                      return f"https://www.youtube.com/watch?v={video_id}"
+
+                      return (
+                          "https://www.youtube.com/watch?v="
+                          + video_id
+                      )
 
 
               return None
 
 
-          # --------------------------------------
-          # Read extracted URLs
-          # --------------------------------------
+          # ==========================================
+          # Main browser function
+          # ==========================================
 
-          with open(
-              input_file,
-              "r",
-              encoding="utf-8",
-              errors="ignore"
-          ) as f:
+          async def main():
 
-              for line in f:
-
-                  result = normalize_url(line)
-
-                  if result and result not in seen:
-
-                      seen.add(result)
-                      links.append(result)
+              from playwright.async_api import async_playwright
 
 
-          # --------------------------------------
-          # Write one URL per line
-          # --------------------------------------
+              print("======================================")
+              print("YouTube link extractor")
+              print("======================================")
 
-          with open(
-              output_file,
-              "w",
-              encoding="utf-8",
-              newline="\n"
-          ) as f:
+              print("Opening:")
+              print(INPUT_URL)
 
-              for link in links:
-                  f.write(link + "\n")
+              links = set()
 
 
-          print("")
-          print("======================================")
-          print("Extraction result")
-          print("======================================")
+              async with async_playwright() as p:
 
-          print(f"Unique video links: {len(links)}")
+                  browser = await p.chromium.launch(
+                      headless=True,
+                      args=[
+                          "--disable-blink-features=AutomationControlled",
+                          "--no-sandbox",
+                          "--disable-dev-shm-usage"
+                      ]
+                  )
 
-          print("======================================")
+
+                  context = await browser.new_context(
+                      viewport={
+                          "width": 1920,
+                          "height": 1080
+                      },
+                      user_agent=(
+                          "Mozilla/5.0 (X11; Linux x86_64) "
+                          "AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) "
+                          "Chrome/131.0.0.0 Safari/537.36"
+                      )
+                  )
+
+
+                  page = await context.new_page()
+
+
+                  # ----------------------------------
+                  # Open page
+                  # ----------------------------------
+
+                  await page.goto(
+                      INPUT_URL,
+                      wait_until="domcontentloaded",
+                      timeout=120000
+                  )
+
+
+                  print("Page loaded.")
+
+                  await page.wait_for_timeout(5000)
+
+
+                  # ----------------------------------
+                  # Collect links function
+                  # ----------------------------------
+
+                  async def collect_links():
+
+                      found = 0
+
+                      hrefs = await page.locator("a").evaluate_all(
+                          """
+                          elements => elements
+                              .map(e => e.href)
+                              .filter(Boolean)
+                          """
+                      )
+
+
+                      for href in hrefs:
+
+                          result = normalize_youtube_url(href)
+
+                          if result and result not in links:
+
+                              links.add(result)
+
+                              found += 1
+
+
+                      return found
+
+
+                  # ----------------------------------
+                  # Initial collection
+                  # ----------------------------------
+
+                  new_links = await collect_links()
+
+                  print(
+                      f"Initial links found: {new_links}"
+                  )
+
+
+                  # ----------------------------------
+                  # Scroll loop
+                  # ----------------------------------
+
+                  previous_count = len(links)
+
+                  stable_rounds = 0
+
+                  MAX_ROUNDS = 100
+
+                  for round_number in range(
+                      1,
+                      MAX_ROUNDS + 1
+                  ):
+
+                      print("")
+                      print(
+                          f"Scroll round #{round_number}"
+                      )
+
+
+                      # Scroll near bottom
+
+                      await page.evaluate(
+                          """
+                          () => {
+                              window.scrollTo(
+                                  0,
+                                  document.documentElement.scrollHeight
+                              );
+                          }
+                          """
+                      )
+
+
+                      # Give YouTube time to load
+
+                      await page.wait_for_timeout(2500)
+
+
+                      # Collect newly loaded links
+
+                      new_links = await collect_links()
+
+                      current_count = len(links)
+
+
+                      print(
+                          f"New links: {new_links}"
+                      )
+
+                      print(
+                          f"Total links: {current_count}"
+                      )
+
+
+                      # ----------------------------------
+                      # Detect no more content
+                      # ----------------------------------
+
+                      if current_count == previous_count:
+
+                          stable_rounds += 1
+
+                          print(
+                              f"No new links "
+                              f"({stable_rounds}/5)"
+                          )
+
+                      else:
+
+                          stable_rounds = 0
+
+
+                      previous_count = current_count
+
+
+                      # Stop after 5 consecutive
+                      # rounds without new links
+
+                      if stable_rounds >= 5:
+
+                          print(
+                              "No more new links detected."
+                          )
+
+                          break
+
+
+                  # ----------------------------------
+                  # Final collection
+                  # ----------------------------------
+
+                  await page.evaluate(
+                      """
+                      () => window.scrollTo(
+                          0,
+                          document.documentElement.scrollHeight
+                      )
+                      """
+                  )
+
+                  await page.wait_for_timeout(3000)
+
+                  await collect_links()
+
+
+                  await browser.close()
+
+
+              # ======================================
+              # Write file
+              # ======================================
+
+              # Sort for deterministic output
+
+              sorted_links = sorted(links)
+
+
+              with open(
+                  OUTPUT_FILE,
+                  "w",
+                  encoding="utf-8",
+                  newline="\n"
+              ) as f:
+
+                  for link in sorted_links:
+
+                      f.write(link + "\n")
+
+
+              print("")
+              print("======================================")
+              print("EXTRACTION COMPLETE")
+              print("======================================")
+
+              print(
+                  f"Total unique links: {len(sorted_links)}"
+              )
+
+              print(
+                  f"Output: {OUTPUT_FILE}"
+              )
+
+              print("======================================")
+
+
+          asyncio.run(main())
 
           PY
 
 
       # ==========================================
-      # Display result
+      # Show result
       # ==========================================
 
       - name: Show extracted links
         run: |
           echo "======================================"
-          echo "youtube_links.txt"
+          echo "Extracted YouTube links"
           echo "======================================"
 
           cat youtube_links.txt
@@ -262,9 +481,11 @@ jobs:
 
           echo "Total links: $COUNT"
 
+          echo "======================================"
+
 
       # ==========================================
-      # Upload TXT to Google Drive
+      # Upload to Google Drive
       # ==========================================
 
       - name: Upload TXT to Google Drive
@@ -272,6 +493,7 @@ jobs:
           set -euo pipefail
 
           python3 <<'PY'
+
           import json
           import os
 
@@ -283,12 +505,8 @@ jobs:
           from googleapiclient.http import MediaFileUpload
 
 
-          # ==========================================
-          # Configuration
-          # ==========================================
-
-          file_path = "youtube_links.txt"
-          file_name = "youtube_links.txt"
+          FILE_PATH = "youtube_links.txt"
+          FILE_NAME = "youtube_links.txt"
 
 
           # ==========================================
@@ -310,32 +528,50 @@ jobs:
 
 
           # ==========================================
-          # Authentication
+          # Authenticate
           # ==========================================
 
           if token_info.get("type") == "service_account":
 
-              print("Using Google Service Account")
+              print(
+                  "Using Google Service Account"
+              )
 
-              creds = service_account.Credentials.from_service_account_info(
-                  token_info,
-                  scopes=scopes
+              credentials = (
+                  service_account
+                  .Credentials
+                  .from_service_account_info(
+                      token_info,
+                      scopes=scopes
+                  )
               )
 
           else:
 
-              print("Using Google OAuth")
-
-              creds = Credentials.from_authorized_user_info(
-                  token_info,
-                  scopes=scopes
+              print(
+                  "Using Google OAuth"
               )
 
-              if creds.expired and creds.refresh_token:
+              credentials = (
+                  Credentials
+                  .from_authorized_user_info(
+                      token_info,
+                      scopes=scopes
+                  )
+              )
 
-                  print("Refreshing OAuth token...")
+              if (
+                  credentials.expired
+                  and credentials.refresh_token
+              ):
 
-                  creds.refresh(Request())
+                  print(
+                      "Refreshing OAuth token..."
+                  )
+
+                  credentials.refresh(
+                      Request()
+                  )
 
 
           # ==========================================
@@ -345,16 +581,16 @@ jobs:
           service = build(
               "drive",
               "v3",
-              credentials=creds
+              credentials=credentials
           )
 
 
           # ==========================================
-          # Upload TXT
+          # Upload
           # ==========================================
 
           media = MediaFileUpload(
-              file_path,
+              FILE_PATH,
               mimetype="text/plain",
               resumable=True
           )
@@ -364,7 +600,7 @@ jobs:
               service.files()
               .create(
                   body={
-                      "name": file_name
+                      "name": FILE_NAME
                   },
                   media_body=media,
                   fields="id,name,webViewLink"
@@ -396,6 +632,17 @@ jobs:
 
 
       # ==========================================
+      # Upload TXT as GitHub artifact too
+      # ==========================================
+
+      - name: Save TXT as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-links
+          path: youtube_links.txt
+
+
+      # ==========================================
       # Cleanup
       # ==========================================
 
@@ -403,6 +650,5 @@ jobs:
         if: always()
         run: |
           rm -f token.json
-          rm -f extracted_raw.txt
 
           echo "Cleanup completed."
