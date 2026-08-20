@@ -1,21 +1,408 @@
-name: Get list
+name: Extract YouTube Links
 
 on:
-  repository_dispatch:
-    types: [get_list]
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "YouTube channel/page URL"
+        required: true
+        type: string
 
 jobs:
-  get_list:
+  extract:
     runs-on: ubuntu-latest
-    steps:
-      - name: Send URL to server
-        env:
-          PAYLOAD: ${{ toJson(github.event.client_payload) }}
-        run: |
-          echo "Sending URL"
 
-          curl -X POST "https://drive-ygsv.onrender.com/youtube-list" \
-            -H "Content-Type: application/json" \
-            -d "$(echo "$PAYLOAD" | jq '{url: .url, token: .token}')" \
-            --fail-with-body \
-            --show-error
+    steps:
+
+      # ==========================================
+      # Checkout
+      # ==========================================
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ==========================================
+      # Install yt-dlp
+      # ==========================================
+
+      - name: Install dependencies
+        timeout-minutes: 5
+        run: |
+          set -euxo pipefail
+
+          python --version
+
+          python -m pip install --upgrade pip
+
+          python -m pip install --upgrade \
+            "yt-dlp[default]" \
+            google-api-python-client \
+            google-auth \
+            google-auth-oauthlib
+
+          echo "Installation completed."
+
+
+      # ==========================================
+      # Verify yt-dlp
+      # ==========================================
+
+      - name: Verify dependencies
+        run: |
+          set -e
+
+          yt-dlp --version
+          echo "Dependencies OK"
+
+
+      # ==========================================
+      # Create Google Drive token
+      # ==========================================
+
+      - name: Create Google Drive token
+        env:
+          GOOGLE_DRIVE_TOKEN: ${{ secrets.GOOGLE_DRIVE_TOKEN }}
+
+        run: |
+          set -e
+
+          if [ -z "$GOOGLE_DRIVE_TOKEN" ]; then
+            echo "ERROR: GOOGLE_DRIVE_TOKEN secret is not configured."
+            exit 1
+          fi
+
+          umask 077
+
+          printf '%s' "$GOOGLE_DRIVE_TOKEN" > token.json
+
+          echo "Google Drive token created."
+
+
+      # ==========================================
+      # Extract YouTube video URLs
+      # ==========================================
+
+      - name: Extract video links
+        env:
+          INPUT_URL: ${{ inputs.url }}
+
+        run: |
+          set -euo pipefail
+
+          echo "======================================"
+          echo "YouTube URL extractor"
+          echo "======================================"
+
+          echo "Input:"
+          echo "$INPUT_URL"
+
+          echo ""
+          echo "Extracting video links..."
+
+          # --------------------------------------
+          # Extract URLs using yt-dlp
+          # --------------------------------------
+
+          yt-dlp \
+            --flat-playlist \
+            --ignore-errors \
+            --no-warnings \
+            --print "%(webpage_url)s" \
+            "$INPUT_URL" \
+            > extracted_raw.txt
+
+          echo ""
+          echo "Raw extraction completed."
+
+
+          # --------------------------------------
+          # Normalize and filter URLs
+          # --------------------------------------
+
+          python3 <<'PY'
+          from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+          input_file = "extracted_raw.txt"
+          output_file = "youtube_links.txt"
+
+          links = []
+          seen = set()
+
+
+          def normalize_url(url):
+              url = url.strip()
+
+              if not url:
+                  return None
+
+              parsed = urlparse(url)
+
+              host = parsed.netloc.lower()
+
+              # Remove www.
+              if host.startswith("www."):
+                  host = host[4:]
+
+              # --------------------------------------
+              # Standard YouTube watch URL
+              # --------------------------------------
+
+              if host in (
+                  "youtube.com",
+                  "m.youtube.com",
+                  "music.youtube.com"
+              ):
+
+                  if parsed.path == "/watch":
+
+                      query = parse_qs(parsed.query)
+
+                      video_id = query.get("v", [None])[0]
+
+                      if video_id:
+                          return f"https://www.youtube.com/watch?v={video_id}"
+
+                  # Shorts
+                  if parsed.path.startswith("/shorts/"):
+
+                      video_id = parsed.path.split("/shorts/", 1)[1].split("/", 1)[0]
+
+                      if video_id:
+                          return f"https://www.youtube.com/shorts/{video_id}"
+
+                  # Embed
+                  if parsed.path.startswith("/embed/"):
+
+                      video_id = parsed.path.split("/embed/", 1)[1].split("/", 1)[0]
+
+                      if video_id:
+                          return f"https://www.youtube.com/watch?v={video_id}"
+
+
+              # --------------------------------------
+              # youtu.be
+              # --------------------------------------
+
+              if host == "youtu.be":
+
+                  video_id = parsed.path.strip("/").split("/", 1)[0]
+
+                  if video_id:
+                      return f"https://www.youtube.com/watch?v={video_id}"
+
+
+              return None
+
+
+          # --------------------------------------
+          # Read extracted URLs
+          # --------------------------------------
+
+          with open(
+              input_file,
+              "r",
+              encoding="utf-8",
+              errors="ignore"
+          ) as f:
+
+              for line in f:
+
+                  result = normalize_url(line)
+
+                  if result and result not in seen:
+
+                      seen.add(result)
+                      links.append(result)
+
+
+          # --------------------------------------
+          # Write one URL per line
+          # --------------------------------------
+
+          with open(
+              output_file,
+              "w",
+              encoding="utf-8",
+              newline="\n"
+          ) as f:
+
+              for link in links:
+                  f.write(link + "\n")
+
+
+          print("")
+          print("======================================")
+          print("Extraction result")
+          print("======================================")
+
+          print(f"Unique video links: {len(links)}")
+
+          print("======================================")
+
+          PY
+
+
+      # ==========================================
+      # Display result
+      # ==========================================
+
+      - name: Show extracted links
+        run: |
+          echo "======================================"
+          echo "youtube_links.txt"
+          echo "======================================"
+
+          cat youtube_links.txt
+
+          echo ""
+          echo "======================================"
+
+          COUNT=$(wc -l < youtube_links.txt)
+
+          echo "Total links: $COUNT"
+
+
+      # ==========================================
+      # Upload TXT to Google Drive
+      # ==========================================
+
+      - name: Upload TXT to Google Drive
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          import os
+
+          from google.auth.transport.requests import Request
+          from google.oauth2.credentials import Credentials
+          from google.oauth2 import service_account
+
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+
+          # ==========================================
+          # Configuration
+          # ==========================================
+
+          file_path = "youtube_links.txt"
+          file_name = "youtube_links.txt"
+
+
+          # ==========================================
+          # Read token
+          # ==========================================
+
+          with open(
+              "token.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              token_info = json.load(f)
+
+
+          scopes = [
+              "https://www.googleapis.com/auth/drive"
+          ]
+
+
+          # ==========================================
+          # Authentication
+          # ==========================================
+
+          if token_info.get("type") == "service_account":
+
+              print("Using Google Service Account")
+
+              creds = service_account.Credentials.from_service_account_info(
+                  token_info,
+                  scopes=scopes
+              )
+
+          else:
+
+              print("Using Google OAuth")
+
+              creds = Credentials.from_authorized_user_info(
+                  token_info,
+                  scopes=scopes
+              )
+
+              if creds.expired and creds.refresh_token:
+
+                  print("Refreshing OAuth token...")
+
+                  creds.refresh(Request())
+
+
+          # ==========================================
+          # Google Drive API
+          # ==========================================
+
+          service = build(
+              "drive",
+              "v3",
+              credentials=creds
+          )
+
+
+          # ==========================================
+          # Upload TXT
+          # ==========================================
+
+          media = MediaFileUpload(
+              file_path,
+              mimetype="text/plain",
+              resumable=True
+          )
+
+
+          uploaded = (
+              service.files()
+              .create(
+                  body={
+                      "name": file_name
+                  },
+                  media_body=media,
+                  fields="id,name,webViewLink"
+              )
+              .execute()
+          )
+
+
+          # ==========================================
+          # Result
+          # ==========================================
+
+          print("")
+          print("======================================")
+          print("UPLOAD SUCCESS")
+          print("======================================")
+
+          print(
+              json.dumps(
+                  uploaded,
+                  ensure_ascii=False,
+                  indent=2
+              )
+          )
+
+          print("======================================")
+
+          PY
+
+
+      # ==========================================
+      # Cleanup
+      # ==========================================
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f token.json
+          rm -f extracted_raw.txt
+
+          echo "Cleanup completed."
