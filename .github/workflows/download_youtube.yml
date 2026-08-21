@@ -120,7 +120,6 @@ jobs:
       - name: Download and upload videos
         env:
           URLS: ${{ inputs.urls }}
-
         run: |
           set -euo pipefail
 
@@ -132,12 +131,22 @@ jobs:
           SUCCESS=0
           FAILED=0
 
-          while IFS= read -r URL; do
+          mkdir -p downloads
 
-            # --------------------------------------
+
+          # ==========================================
+          # Read every URL
+          # ==========================================
+
+          while IFS= read -r URL || [ -n "$URL" ]; do
+
+            # Remove CR from Windows-style input
+            URL="${URL%$'\r'}"
+
+            # Remove leading/trailing spaces
+            URL="$(echo "$URL" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
             # Ignore empty lines
-            # --------------------------------------
-
             if [ -z "$URL" ]; then
               continue
             fi
@@ -153,16 +162,25 @@ jobs:
             echo "======================================"
 
 
-            # --------------------------------------
+            # ==========================================
+            # Temporary output file
+            # ==========================================
+
+            OUTPUT_FILE="yt_output_${COUNT}.txt"
+
+            rm -f "$OUTPUT_FILE"
+
+
+            # ==========================================
             # Download
-            # --------------------------------------
+            # ==========================================
 
             echo ""
             echo "Downloading..."
 
             set +e
 
-            FILE=$(timeout 30m yt-dlp \
+            timeout 30m yt-dlp \
               --cookies cookies.txt \
               --remote-components ejs:github \
               --socket-timeout 30 \
@@ -171,15 +189,25 @@ jobs:
               --retry-sleep 5 \
               -f "best[height<=720]/best" \
               --merge-output-format mp4 \
-              -o "%(title)s.%(ext)s" \
+              -o "downloads/%(title)s.%(ext)s" \
               --print after_move:filepath \
-              "$URL" 2>&1)
+              "$URL" > "$OUTPUT_FILE" 2>&1
 
             EXIT_CODE=$?
 
             set -e
 
-            echo "$FILE"
+
+            # ==========================================
+            # Show yt-dlp output
+            # ==========================================
+
+            cat "$OUTPUT_FILE"
+
+
+            # ==========================================
+            # Check download result
+            # ==========================================
 
             if [ "$EXIT_CODE" -ne 0 ]; then
 
@@ -187,24 +215,66 @@ jobs:
               echo "======================================"
               echo "DOWNLOAD FAILED"
               echo "======================================"
+
               echo "URL:"
               echo "$URL"
-              echo "Exit code: $EXIT_CODE"
+
+              echo "Exit code:"
+              echo "$EXIT_CODE"
+
               echo "======================================"
 
               FAILED=$((FAILED + 1))
 
+              rm -f "$OUTPUT_FILE"
+
               continue
+
             fi
 
 
-            # --------------------------------------
+            # ==========================================
             # Find downloaded file
-            # --------------------------------------
+            # ==========================================
 
-            FILE_PATH=$(echo "$FILE" | tail -n 1)
+            FILE_PATH=""
 
-            if [ ! -f "$FILE_PATH" ]; then
+            # First try the path printed by yt-dlp
+            PRINTED_PATH=$(grep -E '^downloads/' "$OUTPUT_FILE" | tail -n 1 || true)
+
+            if [ -n "$PRINTED_PATH" ] && [ -f "$PRINTED_PATH" ]; then
+              FILE_PATH="$PRINTED_PATH"
+            fi
+
+
+            # Fallback: find newest video file
+            if [ -z "$FILE_PATH" ]; then
+
+              FILE_PATH=$(
+                find downloads \
+                  -maxdepth 1 \
+                  -type f \
+                  \( \
+                    -iname "*.mp4" \
+                    -o -iname "*.mkv" \
+                    -o -iname "*.webm" \
+                    -o -iname "*.mov" \
+                    -o -iname "*.avi" \
+                  \) \
+                  -printf '%T@ %p\n' \
+                  | sort -nr \
+                  | head -n 1 \
+                  | cut -d' ' -f2-
+              )
+
+            fi
+
+
+            # ==========================================
+            # Verify file
+            # ==========================================
+
+            if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
 
               echo ""
               echo "ERROR:"
@@ -212,20 +282,27 @@ jobs:
 
               FAILED=$((FAILED + 1))
 
+              rm -f "$OUTPUT_FILE"
+
               continue
+
             fi
 
+
             echo ""
+            echo "======================================"
+            echo "DOWNLOAD SUCCESS"
+            echo "======================================"
+
             echo "Downloaded file:"
             echo "$FILE_PATH"
 
 
-            # --------------------------------------
+            # ==========================================
             # File information
-            # --------------------------------------
+            # ==========================================
 
             FILE_NAME=$(basename "$FILE_PATH")
-
             FILE_SIZE=$(du -h "$FILE_PATH" | cut -f1)
 
             echo ""
@@ -236,19 +313,21 @@ jobs:
             echo "$FILE_SIZE"
 
 
-            # --------------------------------------
-            # Upload to Google Drive
-            # --------------------------------------
+            # ==========================================
+            # Upload
+            # ==========================================
 
             echo ""
             echo "Uploading to Google Drive..."
 
+
             export FILE_PATH
 
+
             python3 <<'PY'
+
           import json
           import os
-          import sys
 
           from google.auth.transport.requests import Request
           from google.oauth2.credentials import Credentials
@@ -259,12 +338,12 @@ jobs:
 
 
           # ==========================================
-          # Get file
+          # File
           # ==========================================
 
           file_path = os.environ["FILE_PATH"]
-
           file_name = os.path.basename(file_path)
+
 
           print("======================================")
           print("Google Drive upload")
@@ -275,7 +354,7 @@ jobs:
 
 
           # ==========================================
-          # Read token
+          # Token
           # ==========================================
 
           with open(
@@ -287,51 +366,57 @@ jobs:
               token_info = json.load(f)
 
 
-          # ==========================================
-          # Google Drive permissions
-          # ==========================================
-
           scopes = [
               "https://www.googleapis.com/auth/drive"
           ]
 
 
           # ==========================================
-          # Service Account
+          # Authentication
           # ==========================================
 
           if token_info.get("type") == "service_account":
 
-              print("Authentication type: Service Account")
-
-              creds = service_account.Credentials.from_service_account_info(
-                  token_info,
-                  scopes=scopes
+              print(
+                  "Authentication type: Service Account"
               )
 
-
-          # ==========================================
-          # OAuth
-          # ==========================================
+              creds = (
+                  service_account
+                  .Credentials
+                  .from_service_account_info(
+                      token_info,
+                      scopes=scopes
+                  )
+              )
 
           else:
 
-              print("Authentication type: OAuth")
+              print(
+                  "Authentication type: OAuth"
+              )
 
-              creds = Credentials.from_authorized_user_info(
-                  token_info,
-                  scopes=scopes
+              creds = (
+                  Credentials
+                  .from_authorized_user_info(
+                      token_info,
+                      scopes=scopes
+                  )
               )
 
               if creds.expired and creds.refresh_token:
 
-                  print("Refreshing OAuth token...")
+                  print(
+                      "Refreshing OAuth token..."
+                  )
 
-                  creds.refresh(Request())
+                  creds.refresh(
+                      Request()
+                  )
 
 
           # ==========================================
-          # Google Drive API
+          # Drive API
           # ==========================================
 
           service = build(
@@ -384,12 +469,13 @@ jobs:
 
           print("======================================")
 
+
           PY
 
 
-            # --------------------------------------
-            # Delete local file
-            # --------------------------------------
+            # ==========================================
+            # Delete local video
+            # ==========================================
 
             echo ""
             echo "Deleting local file..."
@@ -399,11 +485,15 @@ jobs:
             echo "Local file deleted."
 
 
-            # --------------------------------------
-            # Success
-            # --------------------------------------
+            # ==========================================
+            # Cleanup
+            # ==========================================
+
+            rm -f "$OUTPUT_FILE"
+
 
             SUCCESS=$((SUCCESS + 1))
+
 
             echo ""
             echo "======================================"
@@ -430,14 +520,16 @@ jobs:
           echo "======================================"
 
 
-          # Fail workflow if every URL failed
-
-          if [ "$COUNT" -gt 0 ] && [ "$SUCCESS" -eq 0 ]; then
-            echo ""
-            echo "All downloads failed."
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No URLs were provided."
             exit 1
           fi
 
+
+          if [ "$SUCCESS" -eq 0 ]; then
+            echo "All downloads failed."
+            exit 1
+          fi
 
       # ==========================================
       # Cleanup secrets
