@@ -1,0 +1,404 @@
+name: Upload URL
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL of the file to download"
+        required: true
+        type: string
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ==========================================
+      # Install dependencies
+      # ==========================================
+
+      - name: Install dependencies
+        timeout-minutes: 5
+        run: |
+          set -euxo pipefail
+
+          python -m pip install --upgrade pip
+
+          python -m pip install \
+            google-api-python-client \
+            google-auth \
+            google-auth-oauthlib
+
+          echo "Dependencies installed."
+
+
+      # ==========================================
+      # Create Google Drive token
+      # ==========================================
+
+      - name: Create Google Drive token
+        env:
+          GOOGLE_DRIVE_TOKEN: ${{ secrets.GOOGLE_DRIVE_TOKEN }}
+
+        run: |
+          set -e
+
+          if [ -z "$GOOGLE_DRIVE_TOKEN" ]; then
+            echo "ERROR: GOOGLE_DRIVE_TOKEN secret is not configured."
+            exit 1
+          fi
+
+          umask 077
+
+          printf '%s' "$GOOGLE_DRIVE_TOKEN" > token.json
+
+          echo "Google Drive token created."
+
+
+      # ==========================================
+      # Download Terabox direct URL
+      # ==========================================
+
+      - name: Download Terabox file
+        env:
+          INPUT_URL: ${{ inputs.url }}
+        run: |
+          set -euo pipefail
+
+          URL="$INPUT_URL"
+
+          echo "======================================"
+          echo "Downloading Terabox file"
+          echo "======================================"
+
+          if [ -z "$URL" ]; then
+            echo "ERROR: URL is empty."
+            exit 1
+          fi
+
+          mkdir -p downloads
+
+          # ======================================
+          # Extract filename from Terabox URL
+          # ======================================
+
+          FILENAME=$(python3 - "$URL" <<'PY'
+          import sys
+          from urllib.parse import urlparse, parse_qs, unquote
+
+          url = sys.argv[1]
+
+          query = parse_qs(urlparse(url).query)
+
+          filename = (
+              query.get("fn", [None])[0]
+              or query.get("fin", [None])[0]
+              or "download"
+          )
+
+          print(unquote(filename))
+          PY
+          )
+
+          echo ""
+          echo "Filename:"
+          echo "$FILENAME"
+
+          OUTPUT="downloads/$FILENAME"
+
+          # ======================================
+          # Extract expected size
+          # ======================================
+
+          EXPECTED_SIZE=$(python3 - "$URL" <<'PY'
+          import sys
+          from urllib.parse import urlparse, parse_qs
+
+          url = sys.argv[1]
+
+          query = parse_qs(urlparse(url).query)
+
+          print(query.get("size", [""])[0])
+          PY
+          )
+
+          if [ -n "$EXPECTED_SIZE" ]; then
+            echo ""
+            echo "Expected size:"
+            echo "$EXPECTED_SIZE bytes"
+          fi
+
+          # ======================================
+          # Download
+          # ======================================
+
+          echo ""
+          echo "Starting download..."
+
+          curl \
+            --location \
+            --fail \
+            --show-error \
+            --retry 10 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            --connect-timeout 60 \
+            --max-time 7200 \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36" \
+            --referer "https://www.terabox.com/" \
+            --header "Accept: */*" \
+            --header "Accept-Language: en-US,en;q=0.9" \
+            --header "Connection: keep-alive" \
+            --output "$OUTPUT" \
+            "$URL"
+
+          # ======================================
+          # Verify
+          # ======================================
+
+          if [ ! -f "$OUTPUT" ]; then
+            echo ""
+            echo "ERROR: Downloaded file was not found."
+            exit 1
+          fi
+
+          ACTUAL_SIZE=$(stat -c%s "$OUTPUT")
+
+          echo ""
+          echo "======================================"
+          echo "Download completed"
+          echo "======================================"
+
+          echo "File:"
+          echo "$OUTPUT"
+
+          echo ""
+          echo "Size:"
+          du -h "$OUTPUT"
+
+          echo ""
+          echo "Actual bytes:"
+          echo "$ACTUAL_SIZE"
+
+          # ======================================
+          # Size verification
+          # ======================================
+
+          if [ -n "$EXPECTED_SIZE" ]; then
+
+            if [ "$ACTUAL_SIZE" -eq "$EXPECTED_SIZE" ]; then
+
+              echo ""
+              echo "Size verification: OK"
+
+            else
+
+              echo ""
+              echo "WARNING:"
+              echo "Expected: $EXPECTED_SIZE"
+              echo "Actual:   $ACTUAL_SIZE"
+
+              echo ""
+              echo "The download size does not match."
+
+              exit 1
+            fi
+          fi
+
+          # ======================================
+          # Export file
+          # ======================================
+
+          echo "FILE=$OUTPUT" >> "$GITHUB_ENV"
+
+      # ==========================================
+      # Upload to Google Drive
+      # ==========================================
+
+      - name: Upload to Google Drive
+        run: |
+          set -euo pipefail
+
+          echo "======================================"
+          echo "Uploading to Google Drive"
+          echo "======================================"
+
+          echo "File:"
+          echo "$FILE"
+
+
+          export FILE
+
+
+          python3 <<'PY'
+
+          import json
+          import mimetypes
+          import os
+
+          from google.auth.transport.requests import Request
+          from google.oauth2.credentials import Credentials
+          from google.oauth2 import service_account
+
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+
+          # ==========================================
+          # File
+          # ==========================================
+
+          file_path = os.environ["FILE"]
+
+          file_name = os.path.basename(file_path)
+
+          mime_type = (
+              mimetypes.guess_type(file_name)[0]
+              or "application/octet-stream"
+          )
+
+
+          print("File name:")
+          print(file_name)
+
+          print("MIME type:")
+          print(mime_type)
+
+
+          # ==========================================
+          # Read Google token
+          # ==========================================
+
+          with open(
+              "token.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              token_info = json.load(f)
+
+
+          scopes = [
+              "https://www.googleapis.com/auth/drive"
+          ]
+
+
+          # ==========================================
+          # Authentication
+          # ==========================================
+
+          if token_info.get("type") == "service_account":
+
+              print(
+                  "Authentication: Service Account"
+              )
+
+              creds = (
+                  service_account
+                  .Credentials
+                  .from_service_account_info(
+                      token_info,
+                      scopes=scopes
+                  )
+              )
+
+          else:
+
+              print(
+                  "Authentication: OAuth"
+              )
+
+              creds = (
+                  Credentials
+                  .from_authorized_user_info(
+                      token_info,
+                      scopes=scopes
+                  )
+              )
+
+              if (
+                  creds.expired
+                  and creds.refresh_token
+              ):
+
+                  print(
+                      "Refreshing OAuth token..."
+                  )
+
+                  creds.refresh(
+                      Request()
+                  )
+
+
+          # ==========================================
+          # Google Drive API
+          # ==========================================
+
+          service = build(
+              "drive",
+              "v3",
+              credentials=creds
+          )
+
+
+          # ==========================================
+          # Upload
+          # ==========================================
+
+          media = MediaFileUpload(
+              file_path,
+              mimetype=mime_type,
+              resumable=True
+          )
+
+
+          uploaded = (
+              service.files()
+              .create(
+                  body={
+                      "name": file_name
+                  },
+                  media_body=media,
+                  fields="id,name,webViewLink"
+              )
+              .execute()
+          )
+
+
+          # ==========================================
+          # Result
+          # ==========================================
+
+          print("")
+          print("======================================")
+          print("UPLOAD SUCCESS")
+          print("======================================")
+
+          print(
+              json.dumps(
+                  uploaded,
+                  ensure_ascii=False,
+                  indent=2
+              )
+          )
+
+          print("======================================")
+
+
+          PY
+
+
+      # ==========================================
+      # Cleanup
+      # ==========================================
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f token.json
+          rm -rf downloads
+
+          echo "Cleanup completed."
+    
+    
