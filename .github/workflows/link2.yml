@@ -1,4 +1,4 @@
-name: Upload URL
+name: Upload terabox URL
 
 on:
   workflow_dispatch:
