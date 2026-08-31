@@ -57,10 +57,10 @@ jobs:
 
 
       # ==========================================
-      # Download Terabox direct URL
+      # Resolve Terabox URL using external API
       # ==========================================
 
-      - name: Download Terabox file
+      - name: Resolve and Download Terabox
         env:
           INPUT_URL: ${{ inputs.url }}
         run: |
@@ -69,7 +69,7 @@ jobs:
           URL="$INPUT_URL"
 
           echo "======================================"
-          echo "Downloading Terabox file"
+          echo "Terabox Resolver"
           echo "======================================"
 
           if [ -z "$URL" ]; then
@@ -80,24 +80,106 @@ jobs:
           mkdir -p downloads
 
           # ======================================
-          # Extract filename from Terabox URL
+          # Call external Terabox API
           # ======================================
 
-          FILENAME=$(python3 - "$URL" <<'PY'
-          import sys
-          from urllib.parse import urlparse, parse_qs, unquote
+          API_URL="https://terabox-worker.robinkumarshakya103.workers.dev/api"
 
-          url = sys.argv[1]
+          echo ""
+          echo "Resolving:"
+          echo "$URL"
 
-          query = parse_qs(urlparse(url).query)
+          RESPONSE=$(curl \
+            --fail \
+            --show-error \
+            --retry 3 \
+            --retry-delay 3 \
+            --connect-timeout 30 \
+            --max-time 120 \
+            --get \
+            --data-urlencode "url=$URL" \
+            "$API_URL")
 
-          filename = (
-              query.get("fn", [None])[0]
-              or query.get("fin", [None])[0]
+          echo ""
+          echo "API response received."
+
+          # ======================================
+          # Validate response
+          # ======================================
+
+          echo "$RESPONSE" | python3 -m json.tool > /tmp/terabox_response.json
+
+          SUCCESS=$(python3 - <<'PY'
+          import json
+
+          with open("/tmp/terabox_response.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          print(str(data.get("success", False)).lower())
+          PY
+          )
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo ""
+            echo "ERROR: Terabox API failed."
+
+            cat /tmp/terabox_response.json
+
+            exit 1
+          fi
+
+          # ======================================
+          # Extract first file
+          # ======================================
+
+          FILENAME=$(python3 - <<'PY'
+          import json
+
+          with open("/tmp/terabox_response.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          files = data.get("files", [])
+
+          if not files:
+              raise SystemExit("No files returned by Terabox API.")
+
+          file = files[0]
+
+          name = (
+              file.get("file_name")
+              or file.get("filename")
               or "download"
           )
 
-          print(unquote(filename))
+          print(name)
+          PY
+          )
+
+          DOWNLOAD_URL=$(python3 - <<'PY'
+          import json
+
+          with open("/tmp/terabox_response.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          files = data.get("files", [])
+
+          if not files:
+              raise SystemExit("No files returned by Terabox API.")
+
+          file = files[0]
+
+          url = (
+              file.get("download_url")
+              or file.get("direct_link")
+              or file.get("dlink")
+          )
+
+          if not url:
+              raise SystemExit(
+                  "Terabox API did not return a download URL."
+              )
+
+          print(url)
           PY
           )
 
@@ -105,36 +187,17 @@ jobs:
           echo "Filename:"
           echo "$FILENAME"
 
-          OUTPUT="downloads/$FILENAME"
-
-          # ======================================
-          # Extract expected size
-          # ======================================
-
-          EXPECTED_SIZE=$(python3 - "$URL" <<'PY'
-          import sys
-          from urllib.parse import urlparse, parse_qs
-
-          url = sys.argv[1]
-
-          query = parse_qs(urlparse(url).query)
-
-          print(query.get("size", [""])[0])
-          PY
-          )
-
-          if [ -n "$EXPECTED_SIZE" ]; then
-            echo ""
-            echo "Expected size:"
-            echo "$EXPECTED_SIZE bytes"
-          fi
+          echo ""
+          echo "Direct download URL obtained."
 
           # ======================================
           # Download
           # ======================================
 
+          OUTPUT="downloads/$FILENAME"
+
           echo ""
-          echo "Starting download..."
+          echo "Downloading..."
 
           curl \
             --location \
@@ -145,13 +208,10 @@ jobs:
             --retry-all-errors \
             --connect-timeout 60 \
             --max-time 7200 \
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36" \
-            --referer "https://www.terabox.com/" \
-            --header "Accept: */*" \
-            --header "Accept-Language: en-US,en;q=0.9" \
-            --header "Connection: keep-alive" \
+            --continue-at - \
+            --user-agent "Mozilla/5.0" \
             --output "$OUTPUT" \
-            "$URL"
+            "$DOWNLOAD_URL"
 
           # ======================================
           # Verify
@@ -159,7 +219,7 @@ jobs:
 
           if [ ! -f "$OUTPUT" ]; then
             echo ""
-            echo "ERROR: Downloaded file was not found."
+            echo "ERROR: File was not downloaded."
             exit 1
           fi
 
@@ -178,40 +238,17 @@ jobs:
           du -h "$OUTPUT"
 
           echo ""
-          echo "Actual bytes:"
+          echo "Bytes:"
           echo "$ACTUAL_SIZE"
 
           # ======================================
-          # Size verification
-          # ======================================
-
-          if [ -n "$EXPECTED_SIZE" ]; then
-
-            if [ "$ACTUAL_SIZE" -eq "$EXPECTED_SIZE" ]; then
-
-              echo ""
-              echo "Size verification: OK"
-
-            else
-
-              echo ""
-              echo "WARNING:"
-              echo "Expected: $EXPECTED_SIZE"
-              echo "Actual:   $ACTUAL_SIZE"
-
-              echo ""
-              echo "The download size does not match."
-
-              exit 1
-            fi
-          fi
-
-          # ======================================
-          # Export file
+          # Export
           # ======================================
 
           echo "FILE=$OUTPUT" >> "$GITHUB_ENV"
 
+          rm -f /tmp/terabox_response.json
+    
       # ==========================================
       # Upload to Google Drive
       # ==========================================
