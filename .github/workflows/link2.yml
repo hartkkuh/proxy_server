@@ -4,742 +4,199 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: "GoFile URL to download"
+        description: "GoFile URL"
         required: true
         type: string
 
 jobs:
-  upload:
+  download-and-upload:
     runs-on: ubuntu-latest
 
     steps:
 
-      # ==========================================
-      # Install dependencies
-      # ==========================================
-      - name: Install dependencies
-        timeout-minutes: 5
-        run: |
-          set -euxo pipefail
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      # ============================================================
+      # 2. Python
+      # ============================================================
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ============================================================
+      # 3. Install dependencies
+      # ============================================================
+      - name: Install dependencies
+        run: |
           python -m pip install --upgrade pip
 
-          python -m pip install \
+          pip install \
             requests \
             google-api-python-client \
             google-auth \
             google-auth-oauthlib
 
-          echo "Dependencies installed."
+      # ============================================================
+      # 4. Prepare folders
+      # ============================================================
+      - name: Prepare downloads directory
+        run: |
+          rm -rf downloads
+          mkdir -p downloads
 
-      # ==========================================
-      # Create Google Drive token
-      # ==========================================
-      - name: Create Google Drive token
+      # ============================================================
+      # 5. Download from GoFile
+      #
+      # Uses the current GoFile downloader implementation.
+      #
+      # This handles:
+      # - Guest accounts
+      # - Dynamic X-Website-Token
+      # - error-notPremium fallback
+      # - folders
+      # - nested folders
+      # - multiple files
+      # - special characters
+      # ============================================================
+      - name: Download from GoFile
         env:
-          GOOGLE_DRIVE_TOKEN: ${{ secrets.GOOGLE_DRIVE_TOKEN }}
+          GOFILE_URL: ${{ inputs.url }}
         run: |
           set -e
 
-          if [ -z "$GOOGLE_DRIVE_TOKEN" ]; then
-            echo "ERROR: GOOGLE_DRIVE_TOKEN secret is not configured."
+          echo "=========================================="
+          echo "GoFile download"
+          echo "=========================================="
+          echo "URL: $GOFILE_URL"
+          echo
+
+          git clone --depth 1 \
+            https://github.com/martadams89/gofile-dl.git \
+            gofile-dl
+
+          cd gofile-dl
+
+          echo
+          echo "Installing GoFile downloader dependencies..."
+          pip install -r requirements.txt
+
+          echo
+          echo "Starting GoFile download..."
+          echo
+
+          python run.py \
+            "$GOFILE_URL" \
+            -d ../downloads \
+            -t 4
+
+          cd ..
+
+          echo
+          echo "=========================================="
+          echo "Downloaded files:"
+          echo "=========================================="
+
+          find downloads -type f -printf '%p\n' || true
+
+      # ============================================================
+      # 6. Check downloaded files
+      # ============================================================
+      - name: Verify downloads
+        run: |
+          echo "Checking downloaded files..."
+
+          FILE_COUNT=$(find downloads -type f | wc -l)
+
+          echo "Files found: $FILE_COUNT"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "ERROR: No files were downloaded."
             exit 1
           fi
 
-          umask 077
+          echo
+          echo "Downloaded files:"
+          find downloads -type f -printf '%p\n'
+
+      # ============================================================
+      # 7. Create Google Drive token
+      # ============================================================
+      - name: Prepare Google Drive credentials
+        env:
+          GOOGLE_DRIVE_TOKEN: ${{ secrets.GOOGLE_DRIVE_TOKEN }}
+        run: |
+          if [ -z "$GOOGLE_DRIVE_TOKEN" ]; then
+            echo "ERROR: GOOGLE_DRIVE_TOKEN secret is missing."
+            exit 1
+          fi
 
           printf '%s' "$GOOGLE_DRIVE_TOKEN" > token.json
 
-          echo "Google Drive token created."
-
-      # ==========================================
-      # Download from GoFile
-      # ==========================================
-      - name: Download from GoFile
-        env:
-          INPUT_URL: ${{ inputs.url }}
-        run: |
-          set -euo pipefail
-
-          echo "======================================"
-          echo "GoFile Download"
-          echo "======================================"
-
-          echo "URL:"
-          echo "$INPUT_URL"
-
-          mkdir -p downloads
-
-          python3 <<'PY'
-          import hashlib
-          import os
-          import re
-          import sys
-          import time
-          from pathlib import Path
-
-          import requests
-
-
-          # ==========================================
-          # Configuration
-          # ==========================================
-
-          GOFILE_URL = os.environ["INPUT_URL"]
-
-          API = "https://api.gofile.io"
-
-          DOWNLOAD_DIR = Path("downloads")
-
-          USER_AGENT = (
-              "Mozilla/5.0 (X11; Linux x86_64) "
-              "AppleWebKit/537.36 "
-              "(KHTML, like Gecko) "
-              "Chrome/131.0.0.0 Safari/537.36"
-          )
-
-          LANGUAGE = "en-US"
-
-
-          # ==========================================
-          # HTTP Session
-          # ==========================================
-
-          session = requests.Session()
-
-          session.headers.update({
-              "User-Agent": USER_AGENT,
-              "Accept": "application/json",
-              "Accept-Encoding": "gzip, deflate, br",
-              "Accept-Language": LANGUAGE,
-              "Origin": "https://gofile.io",
-              "Referer": "https://gofile.io/",
-              "Connection": "keep-alive",
-          })
-
-
-          # ==========================================
-          # Extract Content ID
-          # ==========================================
-
-          match = re.search(
-              r"gofile\.io/d/([A-Za-z0-9_-]+)",
-              GOFILE_URL
-          )
-
-          if not match:
-              print("ERROR: Invalid GoFile URL.")
-              print(
-                  "Expected format:"
-                  " https://gofile.io/d/XXXXXXXX"
-              )
-              sys.exit(1)
-
-          content_id = match.group(1)
-
-          print()
-          print("Content ID:")
-          print(content_id)
-
-
-          # ==========================================
-          # Create Guest Account
-          # ==========================================
-
-          print()
-          print("Creating GoFile guest account...")
-
-          response = session.post(
-              f"{API}/accounts",
-              timeout=30
-          )
-
-          print(
-              "Account HTTP status:",
-              response.status_code
-          )
-
-          try:
-              account_data = response.json()
-          except Exception:
-              print(response.text[:2000])
-              sys.exit(1)
-
-          if account_data.get("status") != "ok":
-              print(
-                  "ERROR: Failed to create guest account:"
-              )
-              print(account_data)
-              sys.exit(1)
-
-          account_token = account_data["data"]["token"]
-
-          print("Guest account created.")
-
-
-          # ==========================================
-          # Generate Website Token
-          # ==========================================
-
-          print()
-          print("Generating Website Token...")
-
-          time_slot = int(time.time()) // 14400
-
-          raw = (
-              f"{USER_AGENT}::"
-              f"{LANGUAGE}::"
-              f"{account_token}::"
-              f"{time_slot}::"
-              f"5d4f7g8sd45fsd"
-          )
-
-          website_token = hashlib.sha256(
-              raw.encode("utf-8")
-          ).hexdigest()
-
-          print("Website Token generated.")
-
-
-          # ==========================================
-          # Request Content
-          # ==========================================
-
-          print()
-          print("Requesting GoFile content...")
-
-          content_url = (
-              f"{API}/contents/{content_id}"
-              "?contentFilter="
-              "&page=1"
-              "&pageSize=1000"
-              "&sortField=name"
-              "&sortDirection=1"
-          )
-
-          content_headers = {
-              "User-Agent": USER_AGENT,
-              "Accept": "application/json",
-              "Accept-Encoding": "gzip, deflate, br",
-              "Accept-Language": LANGUAGE,
-              "Origin": "https://gofile.io",
-              "Referer": "https://gofile.io/",
-              "Authorization": (
-                  f"Bearer {account_token}"
-              ),
-              "X-Website-Token": website_token,
-              "X-BL": LANGUAGE,
-          }
-
-          response = session.get(
-              content_url,
-              headers=content_headers,
-              timeout=60
-          )
-
-          print(
-              "Content HTTP status:",
-              response.status_code
-          )
-
-          print(
-              "Content-Type:",
-              response.headers.get(
-                  "content-type",
-                  ""
-              )
-          )
-
-
-          # ==========================================
-          # Handle HTTP errors
-          # ==========================================
-
-          if response.status_code != 200:
-
-              print()
-              print(
-                  "ERROR: GoFile returned HTTP",
-                  response.status_code
-              )
-
-              print()
-              print("Response:")
-              print(response.text[:5000])
-
-              sys.exit(1)
-
-
-          # ==========================================
-          # Parse JSON
-          # ==========================================
-
-          try:
-              content_data = response.json()
-          except Exception:
-
-              print()
-              print(
-                  "ERROR: GoFile did not return JSON."
-              )
-
-              print(response.text[:5000])
-
-              sys.exit(1)
-
-
-          if content_data.get("status") != "ok":
-
-              print()
-              print(
-                  "ERROR: GoFile API returned:"
-              )
-
-              print(content_data)
-
-              sys.exit(1)
-
-
-          data = content_data["data"]
-
-
-          # ==========================================
-          # Display folder information
-          # ==========================================
-
-          print()
-          print("======================================")
-          print("GoFile Content")
-          print("======================================")
-
-          print(
-              "Name:",
-              data.get("name")
-          )
-
-          print(
-              "Type:",
-              data.get("type")
-          )
-
-
-          # ==========================================
-          # Password
-          # ==========================================
-
-          password_status = data.get(
-              "passwordStatus"
-          )
-
-          if password_status not in (
-              None,
-              "passwordOk"
-          ):
-
-              print()
-              print(
-                  "ERROR: Password-protected GoFile."
-              )
-
-              sys.exit(1)
-
-
-          # ==========================================
-          # Get children
-          # ==========================================
-
-          children = data.get("children", {})
-
-          if not children:
-
-              print()
-              print(
-                  "ERROR: No files found."
-              )
-
-              print(data)
-
-              sys.exit(1)
-
-
-          # ==========================================
-          # Find files
-          # ==========================================
-
-          files = []
-
-          for item_id, item in children.items():
-
-              if item.get("type") != "file":
-                  continue
-
-              filename = item.get(
-                  "name",
-                  "download"
-              )
-
-              download_url = item.get(
-                  "link"
-              )
-
-              if not download_url:
-
-                  download_url = item.get(
-                      "directLink"
-                  )
-
-              if not download_url:
-
-                  print(
-                      "WARNING: No download link for:",
-                      filename
-                  )
-
-                  continue
-
-              files.append({
-                  "id": item_id,
-                  "name": filename,
-                  "size": item.get(
-                      "size",
-                      0
-                  ),
-                  "link": download_url,
-              })
-
-
-          # ==========================================
-          # Check files
-          # ==========================================
-
-          print()
-          print("======================================")
-          print("Files Found")
-          print("======================================")
-
-          print(
-              "Total files:",
-              len(files)
-          )
-
-          for item in files:
-
-              print(
-                  f"- {item['name']} "
-                  f"({item['size'] / 1024 / 1024:.2f} MB)"
-              )
-
-
-          if not files:
-
-              print()
-              print(
-                  "ERROR: No downloadable files."
-              )
-
-              sys.exit(1)
-
-
-          # ==========================================
-          # Download
-          # ==========================================
-
-          DOWNLOAD_DIR.mkdir(
-              parents=True,
-              exist_ok=True
-          )
-
-
-          def safe_filename(name):
-
-              name = os.path.basename(name)
-
-              if not name:
-                  return "download"
-
-              return name
-
-
-          for index, item in enumerate(
-              files,
-              1
-          ):
-
-              filename = safe_filename(
-                  item["name"]
-              )
-
-              output_path = (
-                  DOWNLOAD_DIR / filename
-              )
-
-              expected_size = item["size"]
-
-              print()
-              print("======================================")
-              print(
-                  f"Downloading {index}/{len(files)}"
-              )
-              print("======================================")
-
-              print(
-                  "Filename:",
-                  filename
-              )
-
-              print(
-                  "Expected size:",
-                  f"{expected_size / 1024 / 1024:.2f} MB"
-              )
-
-
-              # --------------------------------------
-              # Important:
-              # GoFile download links use accountToken
-              # cookie for authorization.
-              # --------------------------------------
-
-              download_headers = {
-                  "User-Agent": USER_AGENT,
-                  "Referer": (
-                      f"https://gofile.io/d/"
-                      f"{content_id}"
-                  ),
-              }
-
-              download_cookies = {
-                  "accountToken": account_token
-              }
-
-
-              with session.get(
-                  item["link"],
-                  headers=download_headers,
-                  cookies=download_cookies,
-                  stream=True,
-                  allow_redirects=True,
-                  timeout=(30, 1800)
-              ) as download_response:
-
-                  print(
-                      "Download HTTP status:",
-                      download_response.status_code
-                  )
-
-                  download_response.raise_for_status()
-
-                  total = int(
-                      download_response.headers.get(
-                          "content-length",
-                          expected_size or 0
-                      )
-                  )
-
-                  downloaded = 0
-
-                  with open(
-                      output_path,
-                      "wb"
-                  ) as f:
-
-                      for chunk in download_response.iter_content(
-                          chunk_size=1024 * 1024
-                      ):
-
-                          if not chunk:
-                              continue
-
-                          f.write(chunk)
-
-                          downloaded += len(chunk)
-
-                          if total:
-
-                              percent = (
-                                  downloaded * 100
-                                  / total
-                              )
-
-                              print(
-                                  f"\r"
-                                  f"{percent:6.2f}% "
-                                  f"{downloaded / 1024 / 1024:.1f} / "
-                                  f"{total / 1024 / 1024:.1f} MB",
-                                  end="",
-                                  flush=True
-                              )
-
-
-              print()
-
-              # --------------------------------------
-              # Verify
-              # --------------------------------------
-
-              if not output_path.exists():
-
-                  print(
-                      "ERROR: File was not created."
-                  )
-
-                  sys.exit(1)
-
-
-              actual_size = (
-                  output_path.stat().st_size
-              )
-
-              print()
-              print(
-                  "Download completed:"
-              )
-
-              print(
-                  "File:",
-                  output_path
-              )
-
-              print(
-                  "Actual size:",
-                  f"{actual_size / 1024 / 1024:.2f} MB"
-              )
-
-
-              if expected_size:
-
-                  if actual_size != expected_size:
-
-                      print()
-                      print(
-                          "WARNING:"
-                          " File size mismatch."
-                      )
-
-                  else:
-
-                      print(
-                          "Size verification: OK"
-                      )
-
-
-          # ==========================================
-          # Final
-          # ==========================================
-
-          print()
-          print("======================================")
-          print("GoFile download completed")
-          print("======================================")
-
-          for path in DOWNLOAD_DIR.iterdir():
-
-              if path.is_file():
-
-                  print(
-                      f"{path.name} - "
-                      f"{path.stat().st_size / 1024 / 1024:.2f} MB"
-                  )
-
-          PY
-
-      # ==========================================
-      # Upload to Google Drive
-      # ==========================================
+          echo "Google Drive credentials prepared."
+
+      # ============================================================
+      # 8. Upload everything to Google Drive
+      # ============================================================
       - name: Upload to Google Drive
+        env:
+          GOOGLE_DRIVE_TOKEN: ${{ secrets.GOOGLE_DRIVE_TOKEN }}
         run: |
-          set -euo pipefail
-
-          echo "======================================"
-          echo "Uploading to Google Drive"
-          echo "======================================"
-
-          python3 <<'PY'
+          python <<'PY'
+          import os
           import json
           import mimetypes
-          import os
           from pathlib import Path
 
-          from google.auth.transport.requests import Request
           from google.oauth2.credentials import Credentials
-          from google.oauth2 import service_account
+          from google.auth.transport.requests import Request
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
 
-          # ==========================================
-          # Configuration
-          # ==========================================
-
           DOWNLOAD_DIR = Path("downloads")
+          TOKEN_FILE = Path("token.json")
 
-
-          # ==========================================
-          # Read Google token
-          # ==========================================
-
-          with open(
-              "token.json",
-              "r",
-              encoding="utf-8"
-          ) as f:
-              token_info = json.load(f)
-
-
-          scopes = [
+          SCOPES = [
               "https://www.googleapis.com/auth/drive"
           ]
 
 
-          # ==========================================
-          # Authentication
-          # ==========================================
-
-          if token_info.get("type") == "service_account":
-
-              print(
-                  "Authentication: Service Account"
-              )
-
-              creds = (
-                  service_account
-                  .Credentials
-                  .from_service_account_info(
-                      token_info,
-                      scopes=scopes
-                  )
-              )
-
-          else:
-
-              print(
-                  "Authentication: OAuth"
-              )
-
-              creds = (
-                  Credentials
-                  .from_authorized_user_info(
-                      token_info,
-                      scopes=scopes
-                  )
-              )
-
-              if (
-                  creds.expired
-                  and creds.refresh_token
-              ):
-
-                  print(
-                      "Refreshing OAuth token..."
-                  )
-
-                  creds.refresh(
-                      Request()
-                  )
+          print("==========================================")
+          print("Google Drive upload")
+          print("==========================================")
 
 
-          # ==========================================
-          # Google Drive API
-          # ==========================================
+          # ----------------------------------------------------------
+          # Load OAuth token
+          # ----------------------------------------------------------
+
+          if not TOKEN_FILE.exists():
+              raise RuntimeError("token.json was not created.")
+
+
+          creds = Credentials.from_authorized_user_file(
+              str(TOKEN_FILE),
+              SCOPES
+          )
+
+
+          # ----------------------------------------------------------
+          # Refresh token if necessary
+          # ----------------------------------------------------------
+
+          if creds.expired and creds.refresh_token:
+              print("Refreshing Google Drive token...")
+              creds.refresh(Request())
+
+
+          # ----------------------------------------------------------
+          # Connect to Google Drive
+          # ----------------------------------------------------------
 
           service = build(
               "drive",
@@ -748,98 +205,98 @@ jobs:
           )
 
 
-          # ==========================================
-          # Upload every downloaded file
-          # ==========================================
+          # ----------------------------------------------------------
+          # Optional:
+          # Upload into a folder if DRIVE_FOLDER_ID is configured.
+          #
+          # If DRIVE_FOLDER_ID is not configured, files go to
+          # the root of Google Drive.
+          # ----------------------------------------------------------
+
+          parent_id = os.environ.get("DRIVE_FOLDER_ID", "").strip()
+
+
+          # ----------------------------------------------------------
+          # Find files
+          # ----------------------------------------------------------
 
           files = [
               p
-              for p in DOWNLOAD_DIR.iterdir()
+              for p in DOWNLOAD_DIR.rglob("*")
               if p.is_file()
           ]
 
 
           if not files:
-              raise RuntimeError(
-                  "No files to upload."
-              )
+              raise RuntimeError("No downloaded files found.")
 
 
-          for index, file_path in enumerate(
-              files,
-              1
-          ):
+          print(f"Files to upload: {len(files)}")
+          print()
 
-              file_name = file_path.name
 
-              mime_type = (
-                  mimetypes.guess_type(
-                      file_name
-                  )[0]
-                  or "application/octet-stream"
-              )
+          # ----------------------------------------------------------
+          # Upload each file
+          # ----------------------------------------------------------
 
-              print()
-              print("======================================")
-              print(
-                  f"Uploading {index}/{len(files)}"
-              )
-              print("======================================")
+          for index, path in enumerate(files, start=1):
 
-              print(
-                  f"File: {file_name}"
-              )
+              print("------------------------------------------")
+              print(f"[{index}/{len(files)}] Uploading:")
+              print(path)
 
-              print(
-                  f"Size: "
-                  f"{file_path.stat().st_size / 1024 / 1024:.2f} MB"
-              )
+
+              mime_type, _ = mimetypes.guess_type(str(path))
+
+              if mime_type is None:
+                  mime_type = "application/octet-stream"
+
+
+              metadata = {
+                  "name": path.name
+              }
+
+
+              if parent_id:
+                  metadata["parents"] = [parent_id]
+
 
               media = MediaFileUpload(
-                  str(file_path),
+                  str(path),
                   mimetype=mime_type,
                   resumable=True
               )
 
-              uploaded = (
-                  service.files()
-                  .create(
-                      body={
-                          "name": file_name
-                      },
-                      media_body=media,
-                      fields="id,name,webViewLink"
-                  )
-                  .execute()
-              )
+
+              uploaded = service.files().create(
+                  body=metadata,
+                  media_body=media,
+                  fields="id,name,size,webViewLink"
+              ).execute()
+
 
               print()
-              print("UPLOAD SUCCESS")
-
-              print(
-                  json.dumps(
-                      uploaded,
-                      ensure_ascii=False,
-                      indent=2
-                  )
-              )
+              print("Upload successful!")
+              print(f"Name: {uploaded.get('name')}")
+              print(f"ID: {uploaded.get('id')}")
+              print(f"Size: {uploaded.get('size')}")
+              print(f"Link: {uploaded.get('webViewLink')}")
+              print()
 
 
-          print()
-          print("======================================")
+          print("==========================================")
           print("ALL FILES UPLOADED SUCCESSFULLY")
-          print("======================================")
-
-
+          print("==========================================")
           PY
 
-      # ==========================================
-      # Cleanup
-      # ==========================================
+      # ============================================================
+      # 9. Cleanup
+      # ============================================================
       - name: Cleanup
         if: always()
         run: |
-          rm -f token.json
           rm -rf downloads
+          rm -rf gofile-dl
+          rm -f token.json
 
           echo "Cleanup completed."
