@@ -1,4 +1,3 @@
-```yaml
 name: Upload GoFile URL to Google Drive
 
 on:
@@ -711,4 +710,3 @@ jobs:
           rm -rf downloads
 
           echo "Cleanup completed."
-```
