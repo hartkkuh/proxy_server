@@ -1,10 +1,11 @@
-name: Upload terabox URL
+```yaml
+name: Upload GoFile URL to Google Drive
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "URL of the file to download"
+        description: "GoFile URL to download"
         required: true
         type: string
 
@@ -17,7 +18,6 @@ jobs:
       # ==========================================
       # Install dependencies
       # ==========================================
-
       - name: Install dependencies
         timeout-minutes: 5
         run: |
@@ -26,21 +26,19 @@ jobs:
           python -m pip install --upgrade pip
 
           python -m pip install \
+            requests \
             google-api-python-client \
             google-auth \
             google-auth-oauthlib
 
           echo "Dependencies installed."
 
-
       # ==========================================
       # Create Google Drive token
       # ==========================================
-
       - name: Create Google Drive token
         env:
           GOOGLE_DRIVE_TOKEN: ${{ secrets.GOOGLE_DRIVE_TOKEN }}
-
         run: |
           set -e
 
@@ -55,204 +53,466 @@ jobs:
 
           echo "Google Drive token created."
 
-
       # ==========================================
-      # Resolve Terabox URL using external API
+      # Download from GoFile
       # ==========================================
-
-      - name: Resolve and Download Terabox
+      - name: Download from GoFile
         env:
           INPUT_URL: ${{ inputs.url }}
         run: |
           set -euo pipefail
 
-          URL="$INPUT_URL"
-
           echo "======================================"
-          echo "Terabox Resolver"
+          echo "GoFile Download"
           echo "======================================"
 
-          if [ -z "$URL" ]; then
+          echo "URL:"
+          echo "$INPUT_URL"
+
+          if [ -z "$INPUT_URL" ]; then
             echo "ERROR: URL is empty."
             exit 1
           fi
 
           mkdir -p downloads
 
-          # ======================================
-          # Call external Terabox API
-          # ======================================
+          python3 <<'PY'
+          import hashlib
+          import os
+          import re
+          import sys
+          import time
+          from pathlib import Path
 
-          API_URL="https://terabox-worker.robinkumarshakya103.workers.dev/api"
+          import requests
 
-          echo ""
-          echo "Resolving:"
-          echo "$URL"
 
-          RESPONSE=$(curl \
-            --fail \
-            --show-error \
-            --retry 3 \
-            --retry-delay 3 \
-            --connect-timeout 30 \
-            --max-time 120 \
-            --get \
-            --data-urlencode "url=$URL" \
-            "$API_URL")
+          # ==========================================
+          # Configuration
+          # ==========================================
 
-          echo ""
-          echo "API response received."
+          GOFILE_URL = os.environ["INPUT_URL"]
 
-          # ======================================
-          # Validate response
-          # ======================================
+          DOWNLOAD_DIR = Path("downloads")
 
-          echo "$RESPONSE" | python3 -m json.tool > /tmp/terabox_response.json
-
-          SUCCESS=$(python3 - <<'PY'
-          import json
-
-          with open("/tmp/terabox_response.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          print(str(data.get("success", False)).lower())
-          PY
+          USER_AGENT = (
+              "Mozilla/5.0 (X11; Linux x86_64) "
+              "AppleWebKit/537.36 "
+              "(KHTML, like Gecko) "
+              "Chrome/124.0.0.0 Safari/537.36"
           )
 
-          if [ "$SUCCESS" != "true" ]; then
-            echo ""
-            echo "ERROR: Terabox API failed."
+          LANGUAGE = "en-US"
 
-            cat /tmp/terabox_response.json
+          API = "https://api.gofile.io"
 
-            exit 1
-          fi
+          session = requests.Session()
 
-          # ======================================
-          # Extract first file
-          # ======================================
+          session.headers.update({
+              "User-Agent": USER_AGENT,
+              "Accept": "*/*",
+              "Accept-Language": LANGUAGE,
+              "Referer": "https://gofile.io/",
+              "Origin": "https://gofile.io",
+          })
 
-          FILENAME=$(python3 - <<'PY'
-          import json
 
-          with open("/tmp/terabox_response.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
+          # ==========================================
+          # Extract GoFile Content ID
+          # ==========================================
 
-          files = data.get("files", [])
-
-          if not files:
-              raise SystemExit("No files returned by Terabox API.")
-
-          file = files[0]
-
-          name = (
-              file.get("file_name")
-              or file.get("filename")
-              or "download"
+          match = re.search(
+              r"gofile\.io/(?:d|contents)/([A-Za-z0-9_-]+)",
+              GOFILE_URL
           )
 
-          print(name)
-          PY
+          if not match:
+              print("ERROR: Invalid GoFile URL.")
+              print("Example:")
+              print("https://gofile.io/d/qBmQyV3R")
+              sys.exit(1)
+
+          content_id = match.group(1)
+
+          print()
+          print("Content ID:")
+          print(content_id)
+
+
+          # ==========================================
+          # Create Guest Account
+          # ==========================================
+
+          print()
+          print("Creating GoFile guest account...")
+
+          response = session.post(
+              f"{API}/accounts",
+              timeout=30
           )
 
-          DOWNLOAD_URL=$(python3 - <<'PY'
-          import json
+          response.raise_for_status()
 
-          with open("/tmp/terabox_response.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
+          account_data = response.json()
 
-          files = data.get("files", [])
+          if account_data.get("status") != "ok":
+              print("ERROR: Could not create GoFile account.")
+              print(account_data)
+              sys.exit(1)
 
-          if not files:
-              raise SystemExit("No files returned by Terabox API.")
+          account_token = account_data["data"]["token"]
 
-          file = files[0]
+          print("Guest account created.")
 
-          url = (
-              file.get("download_url")
-              or file.get("direct_link")
-              or file.get("dlink")
+
+          # ==========================================
+          # Generate Website Token
+          # ==========================================
+          #
+          # GoFile currently uses a dynamic website token.
+          # The formula is based on:
+          #
+          # User-Agent
+          # Language
+          # Account token
+          # 4-hour time slot
+          # Website secret
+          #
+          # The current public implementations use:
+          #
+          # 5d4f7g8sd45fsd
+          #
+          # ==========================================
+
+          time_slot = int(time.time()) // 14400
+
+          website_secret = "5d4f7g8sd45fsd"
+
+          raw = (
+              f"{USER_AGENT}::"
+              f"{LANGUAGE}::"
+              f"{account_token}::"
+              f"{time_slot}::"
+              f"{website_secret}"
           )
 
-          if not url:
-              raise SystemExit(
-                  "Terabox API did not return a download URL."
+          website_token = hashlib.sha256(
+              raw.encode("utf-8")
+          ).hexdigest()
+
+          print("Website token generated.")
+
+
+          # ==========================================
+          # Authorization
+          # ==========================================
+
+          session.headers.update({
+              "Authorization": f"Bearer {account_token}",
+              "X-Website-Token": website_token,
+              "X-BL": LANGUAGE,
+          })
+
+
+          # ==========================================
+          # Get GoFile content
+          # ==========================================
+
+          print()
+          print("Requesting GoFile content...")
+
+          content_url = (
+              f"{API}/contents/{content_id}"
+              "?contentFilter="
+              "&page=1"
+              "&pageSize=1000"
+              "&sortField=name"
+              "&sortDirection=1"
+          )
+
+          response = session.get(
+              content_url,
+              timeout=60
+          )
+
+          response.raise_for_status()
+
+          content_data = response.json()
+
+          if content_data.get("status") != "ok":
+              print("ERROR: GoFile API returned an error:")
+              print(content_data)
+              sys.exit(1)
+
+          data = content_data["data"]
+
+
+          # ==========================================
+          # Check password
+          # ==========================================
+
+          if data.get("passwordStatus") not in (
+              None,
+              "passwordOk"
+          ):
+              print(
+                  "ERROR: This GoFile link is password protected."
+              )
+              sys.exit(1)
+
+
+          # ==========================================
+          # Get contents
+          # ==========================================
+
+          contents = data.get("children")
+
+          if contents is None:
+              contents = data.get("contents", {})
+
+          if not contents:
+              print("ERROR: No files found.")
+              print(data)
+              sys.exit(1)
+
+          print()
+          print("Files found:")
+          print("--------------------------------------")
+
+
+          files = []
+
+          if isinstance(contents, dict):
+              items = contents.values()
+          else:
+              items = contents
+
+          for item in items:
+
+              if item.get("type") != "file":
+                  continue
+
+              name = item.get("name")
+
+              link = (
+                  item.get("link")
+                  or item.get("directLink")
               )
 
-          print(url)
-          PY
+              size = item.get("size", 0)
+
+              if not link:
+                  print(f"WARNING: No download link: {name}")
+                  continue
+
+              files.append({
+                  "name": name,
+                  "link": link,
+                  "size": size,
+              })
+
+              print(f"- {name}")
+
+          print("--------------------------------------")
+          print(f"Total files: {len(files)}")
+
+
+          if not files:
+              print("ERROR: No downloadable files found.")
+              sys.exit(1)
+
+
+          # ==========================================
+          # Download files
+          # ==========================================
+
+          DOWNLOAD_DIR.mkdir(
+              parents=True,
+              exist_ok=True
           )
 
-          echo ""
-          echo "Filename:"
-          echo "$FILENAME"
+
+          def safe_filename(name):
+
+              # Prevent directory traversal
+              name = os.path.basename(name)
+
+              if not name:
+                  name = "download"
+
+              return name
+
+
+          for index, file_info in enumerate(files, 1):
+
+              filename = safe_filename(file_info["name"])
+
+              output_path = DOWNLOAD_DIR / filename
+
+              print()
+              print("======================================")
+              print(
+                  f"Downloading {index}/{len(files)}"
+              )
+              print("======================================")
+
+              print(f"File: {filename}")
+
+              expected_size = file_info["size"]
+
+              if expected_size:
+                  print(
+                      f"Size: "
+                      f"{expected_size / 1024 / 1024:.2f} MB"
+                  )
+
+              download_url = file_info["link"]
+
+              print()
+              print("Download URL:")
+              print(download_url)
+
+              # ------------------------------------------
+              # Download
+              # ------------------------------------------
+
+              with session.get(
+                  download_url,
+                  stream=True,
+                  timeout=(30, 1800),
+                  allow_redirects=True
+              ) as r:
+
+                  r.raise_for_status()
+
+                  total = int(
+                      r.headers.get(
+                          "content-length",
+                          expected_size or 0
+                      )
+                  )
+
+                  downloaded = 0
+
+                  with open(
+                      output_path,
+                      "wb"
+                  ) as f:
+
+                      for chunk in r.iter_content(
+                          chunk_size=1024 * 1024
+                      ):
+
+                          if not chunk:
+                              continue
+
+                          f.write(chunk)
+
+                          downloaded += len(chunk)
+
+                          if total:
+
+                              percent = (
+                                  downloaded * 100 / total
+                              )
+
+                              print(
+                                  f"\r"
+                                  f"{percent:6.2f}% "
+                                  f""
+                                  f"{downloaded / 1024 / 1024:.1f} / "
+                                  f"{total / 1024 / 1024:.1f} MB",
+                                  end="",
+                                  flush=True
+                              )
+
+              print()
+
+              # ------------------------------------------
+              # Verify file
+              # ------------------------------------------
+
+              if not output_path.exists():
+                  print(
+                      f"ERROR: File was not created: "
+                      f"{output_path}"
+                  )
+                  sys.exit(1)
+
+              actual_size = output_path.stat().st_size
+
+              print()
+              print("Download completed.")
+              print(
+                  f"Saved: {output_path}"
+              )
+              print(
+                  f"Size: "
+                  f"{actual_size / 1024 / 1024:.2f} MB"
+              )
+
+              if expected_size:
+                  if actual_size != expected_size:
+                      print()
+                      print(
+                          "WARNING: File size differs from "
+                          "GoFile reported size."
+                      )
+
+
+          # ==========================================
+          # Export downloaded files
+          # ==========================================
+
+          print()
+          print("======================================")
+          print("GoFile download completed")
+          print("======================================")
+
+          for path in DOWNLOAD_DIR.iterdir():
+
+              if path.is_file():
+
+                  print(
+                      f"{path} "
+                      f"({path.stat().st_size / 1024 / 1024:.2f} MB)"
+                  )
+
+          PY
+
+      # ==========================================
+      # Find downloaded files
+      # ==========================================
+      - name: Find downloaded files
+        run: |
+          set -euo pipefail
+
+          echo "======================================"
+          echo "Downloaded files"
+          echo "======================================"
+
+          find downloads \
+            -maxdepth 1 \
+            -type f \
+            -printf '%p\n'
+
+          FILE_COUNT=$(find downloads \
+            -maxdepth 1 \
+            -type f \
+            | wc -l)
 
           echo ""
-          echo "Direct download URL obtained."
+          echo "File count:"
+          echo "$FILE_COUNT"
 
-          # ======================================
-          # Download
-          # ======================================
-
-          OUTPUT="downloads/$FILENAME"
-
-          echo ""
-          echo "Downloading..."
-
-          curl \
-            --location \
-            --fail \
-            --show-error \
-            --retry 10 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            --connect-timeout 60 \
-            --max-time 7200 \
-            --continue-at - \
-            --user-agent "Mozilla/5.0" \
-            --output "$OUTPUT" \
-            "$DOWNLOAD_URL"
-
-          # ======================================
-          # Verify
-          # ======================================
-
-          if [ ! -f "$OUTPUT" ]; then
-            echo ""
-            echo "ERROR: File was not downloaded."
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "ERROR: No downloaded files."
             exit 1
           fi
 
-          ACTUAL_SIZE=$(stat -c%s "$OUTPUT")
-
-          echo ""
-          echo "======================================"
-          echo "Download completed"
-          echo "======================================"
-
-          echo "File:"
-          echo "$OUTPUT"
-
-          echo ""
-          echo "Size:"
-          du -h "$OUTPUT"
-
-          echo ""
-          echo "Bytes:"
-          echo "$ACTUAL_SIZE"
-
-          # ======================================
-          # Export
-          # ======================================
-
-          echo "FILE=$OUTPUT" >> "$GITHUB_ENV"
-
-          rm -f /tmp/terabox_response.json
-    
       # ==========================================
       # Upload to Google Drive
       # ==========================================
-
       - name: Upload to Google Drive
         run: |
           set -euo pipefail
@@ -261,46 +521,24 @@ jobs:
           echo "Uploading to Google Drive"
           echo "======================================"
 
-          echo "File:"
-          echo "$FILE"
-
-
-          export FILE
-
-
           python3 <<'PY'
-
           import json
           import mimetypes
           import os
+          from pathlib import Path
 
           from google.auth.transport.requests import Request
           from google.oauth2.credentials import Credentials
           from google.oauth2 import service_account
-
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
 
           # ==========================================
-          # File
+          # Configuration
           # ==========================================
 
-          file_path = os.environ["FILE"]
-
-          file_name = os.path.basename(file_path)
-
-          mime_type = (
-              mimetypes.guess_type(file_name)[0]
-              or "application/octet-stream"
-          )
-
-
-          print("File name:")
-          print(file_name)
-
-          print("MIME type:")
-          print(mime_type)
+          DOWNLOAD_DIR = Path("downloads")
 
 
           # ==========================================
@@ -312,7 +550,6 @@ jobs:
               "r",
               encoding="utf-8"
           ) as f:
-
               token_info = json.load(f)
 
 
@@ -380,56 +617,93 @@ jobs:
 
 
           # ==========================================
-          # Upload
+          # Upload every downloaded file
           # ==========================================
 
-          media = MediaFileUpload(
-              file_path,
-              mimetype=mime_type,
-              resumable=True
-          )
+          files = [
+              p
+              for p in DOWNLOAD_DIR.iterdir()
+              if p.is_file()
+          ]
 
 
-          uploaded = (
-              service.files()
-              .create(
-                  body={
-                      "name": file_name
-                  },
-                  media_body=media,
-                  fields="id,name,webViewLink"
+          if not files:
+              raise RuntimeError(
+                  "No files to upload."
               )
-              .execute()
-          )
 
 
-          # ==========================================
-          # Result
-          # ==========================================
+          for index, file_path in enumerate(
+              files,
+              1
+          ):
 
-          print("")
-          print("======================================")
-          print("UPLOAD SUCCESS")
-          print("======================================")
+              file_name = file_path.name
 
-          print(
-              json.dumps(
-                  uploaded,
-                  ensure_ascii=False,
-                  indent=2
+              mime_type = (
+                  mimetypes.guess_type(
+                      file_name
+                  )[0]
+                  or "application/octet-stream"
               )
-          )
 
+              print()
+              print("======================================")
+              print(
+                  f"Uploading {index}/{len(files)}"
+              )
+              print("======================================")
+
+              print(
+                  f"File: {file_name}"
+              )
+
+              print(
+                  f"Size: "
+                  f"{file_path.stat().st_size / 1024 / 1024:.2f} MB"
+              )
+
+              media = MediaFileUpload(
+                  str(file_path),
+                  mimetype=mime_type,
+                  resumable=True
+              )
+
+              uploaded = (
+                  service.files()
+                  .create(
+                      body={
+                          "name": file_name
+                      },
+                      media_body=media,
+                      fields="id,name,webViewLink"
+                  )
+                  .execute()
+              )
+
+              print()
+              print("UPLOAD SUCCESS")
+
+              print(
+                  json.dumps(
+                      uploaded,
+                      ensure_ascii=False,
+                      indent=2
+                  )
+              )
+
+
+          print()
+          print("======================================")
+          print("ALL FILES UPLOADED SUCCESSFULLY")
           print("======================================")
 
 
           PY
 
-
       # ==========================================
       # Cleanup
       # ==========================================
-
       - name: Cleanup
         if: always()
         run: |
@@ -437,5 +711,4 @@ jobs:
           rm -rf downloads
 
           echo "Cleanup completed."
-    
-    
+```
