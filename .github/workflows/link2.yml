@@ -68,11 +68,6 @@ jobs:
           echo "URL:"
           echo "$INPUT_URL"
 
-          if [ -z "$INPUT_URL" ]; then
-            echo "ERROR: URL is empty."
-            exit 1
-          fi
-
           mkdir -p downloads
 
           python3 <<'PY'
@@ -92,43 +87,52 @@ jobs:
 
           GOFILE_URL = os.environ["INPUT_URL"]
 
+          API = "https://api.gofile.io"
+
           DOWNLOAD_DIR = Path("downloads")
 
           USER_AGENT = (
               "Mozilla/5.0 (X11; Linux x86_64) "
               "AppleWebKit/537.36 "
               "(KHTML, like Gecko) "
-              "Chrome/124.0.0.0 Safari/537.36"
+              "Chrome/131.0.0.0 Safari/537.36"
           )
 
           LANGUAGE = "en-US"
 
-          API = "https://api.gofile.io"
+
+          # ==========================================
+          # HTTP Session
+          # ==========================================
 
           session = requests.Session()
 
           session.headers.update({
               "User-Agent": USER_AGENT,
-              "Accept": "*/*",
+              "Accept": "application/json",
+              "Accept-Encoding": "gzip, deflate, br",
               "Accept-Language": LANGUAGE,
-              "Referer": "https://gofile.io/",
               "Origin": "https://gofile.io",
+              "Referer": "https://gofile.io/",
+              "Connection": "keep-alive",
           })
 
 
           # ==========================================
-          # Extract GoFile Content ID
+          # Extract Content ID
           # ==========================================
 
           match = re.search(
-              r"gofile\.io/(?:d|contents)/([A-Za-z0-9_-]+)",
+              r"gofile\.io/d/([A-Za-z0-9_-]+)",
               GOFILE_URL
           )
 
           if not match:
               print("ERROR: Invalid GoFile URL.")
-              print("Example:")
-              print("https://gofile.io/d/qBmQyV3R")
+              print(
+                  "Expected format:"
+                  " https://gofile.io/d/XXXXXXXX"
+              )
               sys.exit(1)
 
           content_id = match.group(1)
@@ -150,12 +154,21 @@ jobs:
               timeout=30
           )
 
-          response.raise_for_status()
+          print(
+              "Account HTTP status:",
+              response.status_code
+          )
 
-          account_data = response.json()
+          try:
+              account_data = response.json()
+          except Exception:
+              print(response.text[:2000])
+              sys.exit(1)
 
           if account_data.get("status") != "ok":
-              print("ERROR: Could not create GoFile account.")
+              print(
+                  "ERROR: Failed to create guest account:"
+              )
               print(account_data)
               sys.exit(1)
 
@@ -167,54 +180,29 @@ jobs:
           # ==========================================
           # Generate Website Token
           # ==========================================
-          #
-          # GoFile currently uses a dynamic website token.
-          # The formula is based on:
-          #
-          # User-Agent
-          # Language
-          # Account token
-          # 4-hour time slot
-          # Website secret
-          #
-          # The current public implementations use:
-          #
-          # 5d4f7g8sd45fsd
-          #
-          # ==========================================
+
+          print()
+          print("Generating Website Token...")
 
           time_slot = int(time.time()) // 14400
-
-          website_secret = "5d4f7g8sd45fsd"
 
           raw = (
               f"{USER_AGENT}::"
               f"{LANGUAGE}::"
               f"{account_token}::"
               f"{time_slot}::"
-              f"{website_secret}"
+              f"5d4f7g8sd45fsd"
           )
 
           website_token = hashlib.sha256(
               raw.encode("utf-8")
           ).hexdigest()
 
-          print("Website token generated.")
+          print("Website Token generated.")
 
 
           # ==========================================
-          # Authorization
-          # ==========================================
-
-          session.headers.update({
-              "Authorization": f"Bearer {account_token}",
-              "X-Website-Token": website_token,
-              "X-BL": LANGUAGE,
-          })
-
-
-          # ==========================================
-          # Get GoFile content
+          # Request Content
           # ==========================================
 
           print()
@@ -229,100 +217,231 @@ jobs:
               "&sortDirection=1"
           )
 
+          content_headers = {
+              "User-Agent": USER_AGENT,
+              "Accept": "application/json",
+              "Accept-Encoding": "gzip, deflate, br",
+              "Accept-Language": LANGUAGE,
+              "Origin": "https://gofile.io",
+              "Referer": "https://gofile.io/",
+              "Authorization": (
+                  f"Bearer {account_token}"
+              ),
+              "X-Website-Token": website_token,
+              "X-BL": LANGUAGE,
+          }
+
           response = session.get(
               content_url,
+              headers=content_headers,
               timeout=60
           )
 
-          response.raise_for_status()
+          print(
+              "Content HTTP status:",
+              response.status_code
+          )
 
-          content_data = response.json()
+          print(
+              "Content-Type:",
+              response.headers.get(
+                  "content-type",
+                  ""
+              )
+          )
+
+
+          # ==========================================
+          # Handle HTTP errors
+          # ==========================================
+
+          if response.status_code != 200:
+
+              print()
+              print(
+                  "ERROR: GoFile returned HTTP",
+                  response.status_code
+              )
+
+              print()
+              print("Response:")
+              print(response.text[:5000])
+
+              sys.exit(1)
+
+
+          # ==========================================
+          # Parse JSON
+          # ==========================================
+
+          try:
+              content_data = response.json()
+          except Exception:
+
+              print()
+              print(
+                  "ERROR: GoFile did not return JSON."
+              )
+
+              print(response.text[:5000])
+
+              sys.exit(1)
+
 
           if content_data.get("status") != "ok":
-              print("ERROR: GoFile API returned an error:")
+
+              print()
+              print(
+                  "ERROR: GoFile API returned:"
+              )
+
               print(content_data)
+
               sys.exit(1)
+
 
           data = content_data["data"]
 
 
           # ==========================================
-          # Check password
+          # Display folder information
           # ==========================================
 
-          if data.get("passwordStatus") not in (
+          print()
+          print("======================================")
+          print("GoFile Content")
+          print("======================================")
+
+          print(
+              "Name:",
+              data.get("name")
+          )
+
+          print(
+              "Type:",
+              data.get("type")
+          )
+
+
+          # ==========================================
+          # Password
+          # ==========================================
+
+          password_status = data.get(
+              "passwordStatus"
+          )
+
+          if password_status not in (
               None,
               "passwordOk"
           ):
+
+              print()
               print(
-                  "ERROR: This GoFile link is password protected."
+                  "ERROR: Password-protected GoFile."
               )
+
               sys.exit(1)
 
 
           # ==========================================
-          # Get contents
+          # Get children
           # ==========================================
 
-          contents = data.get("children")
+          children = data.get("children", {})
 
-          if contents is None:
-              contents = data.get("contents", {})
+          if not children:
 
-          if not contents:
-              print("ERROR: No files found.")
+              print()
+              print(
+                  "ERROR: No files found."
+              )
+
               print(data)
+
               sys.exit(1)
 
-          print()
-          print("Files found:")
-          print("--------------------------------------")
 
+          # ==========================================
+          # Find files
+          # ==========================================
 
           files = []
 
-          if isinstance(contents, dict):
-              items = contents.values()
-          else:
-              items = contents
-
-          for item in items:
+          for item_id, item in children.items():
 
               if item.get("type") != "file":
                   continue
 
-              name = item.get("name")
-
-              link = (
-                  item.get("link")
-                  or item.get("directLink")
+              filename = item.get(
+                  "name",
+                  "download"
               )
 
-              size = item.get("size", 0)
+              download_url = item.get(
+                  "link"
+              )
 
-              if not link:
-                  print(f"WARNING: No download link: {name}")
+              if not download_url:
+
+                  download_url = item.get(
+                      "directLink"
+                  )
+
+              if not download_url:
+
+                  print(
+                      "WARNING: No download link for:",
+                      filename
+                  )
+
                   continue
 
               files.append({
-                  "name": name,
-                  "link": link,
-                  "size": size,
+                  "id": item_id,
+                  "name": filename,
+                  "size": item.get(
+                      "size",
+                      0
+                  ),
+                  "link": download_url,
               })
 
-              print(f"- {name}")
 
-          print("--------------------------------------")
-          print(f"Total files: {len(files)}")
+          # ==========================================
+          # Check files
+          # ==========================================
+
+          print()
+          print("======================================")
+          print("Files Found")
+          print("======================================")
+
+          print(
+              "Total files:",
+              len(files)
+          )
+
+          for item in files:
+
+              print(
+                  f"- {item['name']} "
+                  f"({item['size'] / 1024 / 1024:.2f} MB)"
+              )
 
 
           if not files:
-              print("ERROR: No downloadable files found.")
+
+              print()
+              print(
+                  "ERROR: No downloadable files."
+              )
+
               sys.exit(1)
 
 
           # ==========================================
-          # Download files
+          # Download
           # ==========================================
 
           DOWNLOAD_DIR.mkdir(
@@ -333,20 +452,28 @@ jobs:
 
           def safe_filename(name):
 
-              # Prevent directory traversal
               name = os.path.basename(name)
 
               if not name:
-                  name = "download"
+                  return "download"
 
               return name
 
 
-          for index, file_info in enumerate(files, 1):
+          for index, item in enumerate(
+              files,
+              1
+          ):
 
-              filename = safe_filename(file_info["name"])
+              filename = safe_filename(
+                  item["name"]
+              )
 
-              output_path = DOWNLOAD_DIR / filename
+              output_path = (
+                  DOWNLOAD_DIR / filename
+              )
+
+              expected_size = item["size"]
 
               print()
               print("======================================")
@@ -355,37 +482,54 @@ jobs:
               )
               print("======================================")
 
-              print(f"File: {filename}")
+              print(
+                  "Filename:",
+                  filename
+              )
 
-              expected_size = file_info["size"]
+              print(
+                  "Expected size:",
+                  f"{expected_size / 1024 / 1024:.2f} MB"
+              )
 
-              if expected_size:
-                  print(
-                      f"Size: "
-                      f"{expected_size / 1024 / 1024:.2f} MB"
-                  )
 
-              download_url = file_info["link"]
+              # --------------------------------------
+              # Important:
+              # GoFile download links use accountToken
+              # cookie for authorization.
+              # --------------------------------------
 
-              print()
-              print("Download URL:")
-              print(download_url)
+              download_headers = {
+                  "User-Agent": USER_AGENT,
+                  "Referer": (
+                      f"https://gofile.io/d/"
+                      f"{content_id}"
+                  ),
+              }
 
-              # ------------------------------------------
-              # Download
-              # ------------------------------------------
+              download_cookies = {
+                  "accountToken": account_token
+              }
+
 
               with session.get(
-                  download_url,
+                  item["link"],
+                  headers=download_headers,
+                  cookies=download_cookies,
                   stream=True,
-                  timeout=(30, 1800),
-                  allow_redirects=True
-              ) as r:
+                  allow_redirects=True,
+                  timeout=(30, 1800)
+              ) as download_response:
 
-                  r.raise_for_status()
+                  print(
+                      "Download HTTP status:",
+                      download_response.status_code
+                  )
+
+                  download_response.raise_for_status()
 
                   total = int(
-                      r.headers.get(
+                      download_response.headers.get(
                           "content-length",
                           expected_size or 0
                       )
@@ -398,7 +542,7 @@ jobs:
                       "wb"
                   ) as f:
 
-                      for chunk in r.iter_content(
+                      for chunk in download_response.iter_content(
                           chunk_size=1024 * 1024
                       ):
 
@@ -412,55 +556,74 @@ jobs:
                           if total:
 
                               percent = (
-                                  downloaded * 100 / total
+                                  downloaded * 100
+                                  / total
                               )
 
                               print(
                                   f"\r"
                                   f"{percent:6.2f}% "
-                                  f""
                                   f"{downloaded / 1024 / 1024:.1f} / "
                                   f"{total / 1024 / 1024:.1f} MB",
                                   end="",
                                   flush=True
                               )
 
+
               print()
 
-              # ------------------------------------------
-              # Verify file
-              # ------------------------------------------
+              # --------------------------------------
+              # Verify
+              # --------------------------------------
 
               if not output_path.exists():
+
                   print(
-                      f"ERROR: File was not created: "
-                      f"{output_path}"
+                      "ERROR: File was not created."
                   )
+
                   sys.exit(1)
 
-              actual_size = output_path.stat().st_size
+
+              actual_size = (
+                  output_path.stat().st_size
+              )
 
               print()
-              print("Download completed.")
               print(
-                  f"Saved: {output_path}"
+                  "Download completed:"
               )
+
               print(
-                  f"Size: "
+                  "File:",
+                  output_path
+              )
+
+              print(
+                  "Actual size:",
                   f"{actual_size / 1024 / 1024:.2f} MB"
               )
 
+
               if expected_size:
+
                   if actual_size != expected_size:
+
                       print()
                       print(
-                          "WARNING: File size differs from "
-                          "GoFile reported size."
+                          "WARNING:"
+                          " File size mismatch."
+                      )
+
+                  else:
+
+                      print(
+                          "Size verification: OK"
                       )
 
 
           # ==========================================
-          # Export downloaded files
+          # Final
           # ==========================================
 
           print()
@@ -473,41 +636,11 @@ jobs:
               if path.is_file():
 
                   print(
-                      f"{path} "
-                      f"({path.stat().st_size / 1024 / 1024:.2f} MB)"
+                      f"{path.name} - "
+                      f"{path.stat().st_size / 1024 / 1024:.2f} MB"
                   )
 
           PY
-
-      # ==========================================
-      # Find downloaded files
-      # ==========================================
-      - name: Find downloaded files
-        run: |
-          set -euo pipefail
-
-          echo "======================================"
-          echo "Downloaded files"
-          echo "======================================"
-
-          find downloads \
-            -maxdepth 1 \
-            -type f \
-            -printf '%p\n'
-
-          FILE_COUNT=$(find downloads \
-            -maxdepth 1 \
-            -type f \
-            | wc -l)
-
-          echo ""
-          echo "File count:"
-          echo "$FILE_COUNT"
-
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "ERROR: No downloaded files."
-            exit 1
-          fi
 
       # ==========================================
       # Upload to Google Drive
