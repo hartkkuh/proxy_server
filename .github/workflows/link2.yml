@@ -92,7 +92,6 @@ jobs:
           python run.py \
             "$GOFILE_URL" \
             -d ../downloads \
-            -t 4
 
           cd ..
 
