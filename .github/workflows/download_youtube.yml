@@ -63,7 +63,14 @@ jobs:
 
           echo "Installation completed."
 
-
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq
+          echo "FFmpeg and jq installed."
+          ffmpeg -version | head -n 1
       # ==========================================
       # Verify dependencies
       # ==========================================
