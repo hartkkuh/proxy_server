@@ -187,23 +187,21 @@ jobs:
 
             set +e
 
-            timeout 30m yt-dlp \
-              --cookies cookies.txt \
-              --remote-components ejs:github \
-              --socket-timeout 30 \
-              --retries 10 \
-              --fragment-retries 10 \
-              --retry-sleep 5 \
-              -f "best[height<=720]/best" \
-              --merge-output-format mp4 \
-              -o "downloads/%(title)s.%(ext)s" \
-              --print after_move:filepath \
-              "$URL" > "$OUTPUT_FILE" 2>&1
-
-            EXIT_CODE=$?
-
-            set -e
-
+          timeout 30m yt-dlp \
+            --cookies cookies.txt \
+            --remote-components ejs:github \
+            --extractor-args "youtube:player_client=default,web_embedded" \
+            --sleep-requests 1 \
+            --socket-timeout 60 \
+            --retries 10 \
+            --fragment-retries 10 \
+            --retry-sleep "http:exp=1:20" \
+            --retry-sleep "fragment:exp=1:20" \
+            -f "best[height<=720]/best" \
+            --merge-output-format mp4 \
+            -o "downloads/%(title)s.%(ext)s" \
+            --print after_move:filepath \
+            "$URL" > "$OUTPUT_FILE" 2>&1
 
             # ==========================================
             # Show yt-dlp output
@@ -216,29 +214,15 @@ jobs:
             # Check download result
             # ==========================================
 
-            if [ "$EXIT_CODE" -ne 0 ]; then
-
-              echo ""
-              echo "======================================"
-              echo "DOWNLOAD FAILED"
-              echo "======================================"
-
-              echo "URL:"
-              echo "$URL"
-
-              echo "Exit code:"
-              echo "$EXIT_CODE"
-
-              echo "======================================"
-
+          if ! ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "$FILE_PATH" >/dev/null 2>&1; then
+              echo "ERROR: File is incomplete or invalid."
               FAILED=$((FAILED + 1))
-
               rm -f "$OUTPUT_FILE"
-
               continue
-
-            fi
-
+          fi
 
             # ==========================================
             # Find downloaded file
